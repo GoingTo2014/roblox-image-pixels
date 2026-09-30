@@ -21,6 +21,11 @@ function json(data, status = 200) {
     });
 }
 
+
+// ============================================================
+// IMAGE FORMAT DETECTION
+// ============================================================
+
 function isPNG(bytes) {
     return (
         bytes.length >= 8 &&
@@ -44,97 +49,354 @@ function isJPEG(bytes) {
     );
 }
 
+
+// ============================================================
+// PNG RGBA NORMALIZATION
+// ============================================================
+
+function pngToRGBA(png) {
+
+    const width = png.width;
+    const height = png.height;
+    const source = png.image;
+
+    const colorType = png.colorType;
+    const bitDepth = png.bitDepth;
+    const lineSize = png.lineSize;
+
+    if (!source) {
+        throw new Error("PNG decoder returned no image data");
+    }
+
+    if (!width || !height) {
+        throw new Error("PNG decoder returned invalid dimensions");
+    }
+
+    /*
+     * We currently handle 8-bit PNGs here.
+     *
+     * colorType:
+     *
+     * 0 = grayscale
+     * 2 = RGB
+     * 3 = indexed/palette
+     * 4 = grayscale + alpha
+     * 6 = RGBA
+     */
+
+    if (bitDepth !== 8) {
+        throw new Error(
+            "Unsupported PNG bit depth: " +
+            bitDepth +
+            ". Only 8-bit PNGs are currently supported."
+        );
+    }
+
+    let channels;
+
+    switch (colorType) {
+
+        case 0:
+            // Grayscale
+            channels = 1;
+            break;
+
+        case 2:
+            // RGB
+            channels = 3;
+            break;
+
+        case 4:
+            // Grayscale + alpha
+            channels = 2;
+            break;
+
+        case 6:
+            // RGBA
+            channels = 4;
+            break;
+
+        default:
+            throw new Error(
+                "Unsupported PNG color type: " +
+                colorType
+            );
+    }
+
+    /*
+     * lineSize is supplied by the decoder and represents
+     * the number of bytes in one decoded row.
+     */
+
+    const expectedLineSize =
+        width * channels;
+
+    const actualLineSize =
+        lineSize || expectedLineSize;
+
+    if (actualLineSize < expectedLineSize) {
+        throw new Error(
+            "PNG line size is too small. " +
+            "Expected at least " +
+            expectedLineSize +
+            ", got " +
+            actualLineSize
+        );
+    }
+
+    const rgba =
+        new Uint8Array(width * height * 4);
+
+    for (let y = 0; y < height; y++) {
+
+        const sourceRowStart =
+            y * actualLineSize;
+
+        const outputRowStart =
+            y * width * 4;
+
+        for (let x = 0; x < width; x++) {
+
+            const sourceIndex =
+                sourceRowStart +
+                x * channels;
+
+            const outputIndex =
+                outputRowStart +
+                x * 4;
+
+            if (
+                sourceIndex + channels >
+                source.length
+            ) {
+                throw new Error(
+                    "PNG pixel data ended unexpectedly at " +
+                    x +
+                    "," +
+                    y
+                );
+            }
+
+            if (colorType === 0) {
+
+                // -----------------------------
+                // Grayscale
+                // -----------------------------
+
+                const gray =
+                    source[sourceIndex];
+
+                rgba[outputIndex] =
+                    gray;
+
+                rgba[outputIndex + 1] =
+                    gray;
+
+                rgba[outputIndex + 2] =
+                    gray;
+
+                rgba[outputIndex + 3] =
+                    255;
+
+            } else if (colorType === 2) {
+
+                // -----------------------------
+                // RGB
+                // -----------------------------
+
+                rgba[outputIndex] =
+                    source[sourceIndex];
+
+                rgba[outputIndex + 1] =
+                    source[sourceIndex + 1];
+
+                rgba[outputIndex + 2] =
+                    source[sourceIndex + 2];
+
+                rgba[outputIndex + 3] =
+                    255;
+
+            } else if (colorType === 4) {
+
+                // -----------------------------
+                // Grayscale + Alpha
+                // -----------------------------
+
+                const gray =
+                    source[sourceIndex];
+
+                const alpha =
+                    source[sourceIndex + 1];
+
+                rgba[outputIndex] =
+                    gray;
+
+                rgba[outputIndex + 1] =
+                    gray;
+
+                rgba[outputIndex + 2] =
+                    gray;
+
+                rgba[outputIndex + 3] =
+                    alpha;
+
+            } else if (colorType === 6) {
+
+                // -----------------------------
+                // RGBA
+                // -----------------------------
+
+                rgba[outputIndex] =
+                    source[sourceIndex];
+
+                rgba[outputIndex + 1] =
+                    source[sourceIndex + 1];
+
+                rgba[outputIndex + 2] =
+                    source[sourceIndex + 2];
+
+                rgba[outputIndex + 3] =
+                    source[sourceIndex + 3];
+            }
+        }
+    }
+
+    return rgba;
+}
+
+
+// ============================================================
+// MAIN WORKER
+// ============================================================
+
 export default {
+
     async fetch(request) {
 
-        // -----------------------------
-        // CORS preflight
-        // -----------------------------
+        // ------------------------------------------------------
+        // CORS
+        // ------------------------------------------------------
 
         if (request.method === "OPTIONS") {
+
             return new Response(null, {
                 status: 204,
                 headers: CORS_HEADERS
             });
         }
 
-        // -----------------------------
-        // Health check
-        // -----------------------------
+
+        // ------------------------------------------------------
+        // HEALTH CHECK
+        // ------------------------------------------------------
 
         if (request.method === "GET") {
+
             return json({
                 success: true,
-                message: "Roblox image pixel Worker is online!"
+                message:
+                    "Roblox image pixel Worker is online!"
             });
         }
 
-        // -----------------------------
-        // Only POST is supported
-        // -----------------------------
+
+        // ------------------------------------------------------
+        // POST ONLY
+        // ------------------------------------------------------
 
         if (request.method !== "POST") {
+
             return json({
                 error: "POST requests only"
             }, 405);
         }
 
+
         try {
 
-            // -----------------------------
-            // Parse request
-            // -----------------------------
+            // --------------------------------------------------
+            // REQUEST BODY
+            // --------------------------------------------------
 
-            const body = await request.json();
+            const body =
+                await request.json();
 
-            if (!body.url || typeof body.url !== "string") {
+            if (
+                !body.url ||
+                typeof body.url !== "string"
+            ) {
+
                 return json({
-                    error: "Missing image URL"
+                    error:
+                        "Missing image URL"
                 }, 400);
             }
 
-            // -----------------------------
-            // Validate URL
-            // -----------------------------
+
+            // --------------------------------------------------
+            // URL
+            // --------------------------------------------------
 
             let imageURL;
 
             try {
-                imageURL = new URL(body.url);
+
+                imageURL =
+                    new URL(body.url);
+
             } catch {
+
                 return json({
-                    error: "Invalid URL"
+                    error:
+                        "Invalid URL"
                 }, 400);
             }
 
-            if (imageURL.protocol !== "https:") {
+
+            if (
+                imageURL.protocol !==
+                "https:"
+            ) {
+
                 return json({
-                    error: "HTTPS URLs only"
+                    error:
+                        "HTTPS URLs only"
                 }, 400);
             }
 
-            // -----------------------------
-            // Download image
-            // -----------------------------
 
-            const imageResponse = await fetch(
-                imageURL.toString(),
-                {
-                    headers: {
-                        "User-Agent": "Mozilla/5.0",
-                        "Accept":
-                            "image/png,image/jpeg,image/*,*/*"
+            // --------------------------------------------------
+            // FETCH IMAGE
+            // --------------------------------------------------
+
+            const imageResponse =
+                await fetch(
+                    imageURL.toString(),
+                    {
+                        headers: {
+                            "User-Agent":
+                                "Mozilla/5.0",
+
+                            "Accept":
+                                "image/png,image/jpeg,image/*,*/*"
+                        }
                     }
-                }
-            );
+                );
+
 
             if (!imageResponse.ok) {
+
                 return json({
                     error:
                         "Image request failed: HTTP " +
                         imageResponse.status
                 }, 400);
             }
+
+
+            // --------------------------------------------------
+            // CONTENT TYPE
+            // --------------------------------------------------
 
             const contentType =
                 (
@@ -146,9 +408,10 @@ export default {
                     .trim()
                     .toLowerCase();
 
-            // -----------------------------
-            // Read image bytes
-            // -----------------------------
+
+            // --------------------------------------------------
+            // READ BYTES
+            // --------------------------------------------------
 
             const buffer =
                 await imageResponse.arrayBuffer();
@@ -156,83 +419,104 @@ export default {
             const bytes =
                 new Uint8Array(buffer);
 
+
             if (bytes.length === 0) {
+
                 return json({
-                    error: "Image response was empty"
+                    error:
+                        "Image response was empty"
                 }, 400);
             }
 
-            if (bytes.length > MAX_BYTES) {
+
+            if (
+                bytes.length >
+                MAX_BYTES
+            ) {
+
                 return json({
-                    error: "Image is too large",
-                    downloadedBytes: bytes.length,
-                    maxBytes: MAX_BYTES
+                    error:
+                        "Image is too large",
+
+                    downloadedBytes:
+                        bytes.length,
+
+                    maxBytes:
+                        MAX_BYTES
                 }, 413);
             }
 
-            // -----------------------------
-            // Detect actual image format
-            // -----------------------------
 
-            const actualPNG = isPNG(bytes);
-            const actualJPEG = isJPEG(bytes);
+            // --------------------------------------------------
+            // DETECT FORMAT
+            // --------------------------------------------------
+
+            const actualPNG =
+                isPNG(bytes);
+
+            const actualJPEG =
+                isJPEG(bytes);
+
 
             let sourceWidth;
             let sourceHeight;
             let rgba;
 
-            // =====================================================
+
+            // ==================================================
             // PNG
-            // =====================================================
+            // ==================================================
 
             if (actualPNG) {
 
                 try {
 
-                    /*
-                     * IMPORTANT:
-                     *
-                     * @cf-wasm/png expects Uint8Array.
-                     */
+                    const png =
+                        decode(bytes);
 
-                    const png = decode(bytes);
+                    sourceWidth =
+                        png.width;
 
-                    sourceWidth = png.width;
-                    sourceHeight = png.height;
+                    sourceHeight =
+                        png.height;
 
-                    /*
-                     * @cf-wasm/png returns decoded
-                     * pixel data as `image`.
-                     */
-
-                    rgba = png.image;
+                    rgba =
+                        pngToRGBA(png);
 
                 } catch (error) {
 
                     return json({
-                        error: "PNG decoding failed",
-                        details: String(error),
+                        error:
+                            "PNG decoding failed",
+
+                        details:
+                            String(error),
+
                         contentType,
-                        downloadedBytes: bytes.length
+
+                        downloadedBytes:
+                            bytes.length
                     }, 500);
                 }
             }
 
-            // =====================================================
+
+            // ==================================================
             // JPEG
-            // =====================================================
+            // ==================================================
 
             else if (actualJPEG) {
 
                 try {
 
-                    const jpegImage = jpeg.decode(
-                        bytes,
-                        {
-                            useTArray: true,
-                            formatAsRGBA: true
-                        }
-                    );
+                    const jpegImage =
+                        jpeg.decode(
+                            bytes,
+                            {
+                                useTArray: true,
+                                formatAsRGBA: true
+                            }
+                        );
 
                     sourceWidth =
                         jpegImage.width;
@@ -246,117 +530,214 @@ export default {
                 } catch (error) {
 
                     return json({
-                        error: "JPEG decoding failed",
-                        details: String(error),
+                        error:
+                            "JPEG decoding failed",
+
+                        details:
+                            String(error),
+
                         contentType,
-                        downloadedBytes: bytes.length
+
+                        downloadedBytes:
+                            bytes.length
                     }, 500);
                 }
             }
 
-            // =====================================================
-            // Unsupported
-            // =====================================================
+
+            // ==================================================
+            // UNKNOWN
+            // ==================================================
 
             else {
 
                 let preview = "";
 
                 try {
+
                     preview =
-                        new TextDecoder().decode(
-                            bytes.slice(0, 200)
-                        );
+                        new TextDecoder()
+                            .decode(
+                                bytes.slice(
+                                    0,
+                                    200
+                                )
+                            );
+
                 } catch {
+
                     preview = "";
                 }
 
+
                 return json({
+
                     error:
                         "Downloaded file is not a PNG or JPEG",
 
                     contentType:
-                        contentType || "unknown",
+                        contentType ||
+                        "unknown",
 
                     downloadedBytes:
                         bytes.length,
 
                     firstBytes:
                         Array.from(
-                            bytes.slice(0, 16)
+                            bytes.slice(
+                                0,
+                                16
+                            )
                         ),
 
                     responsePreview:
                         preview
+
                 }, 415);
             }
 
-            // -----------------------------
-            // Validate decoder output
-            // -----------------------------
+
+            // --------------------------------------------------
+            // FINAL VALIDATION
+            // --------------------------------------------------
 
             if (
                 !sourceWidth ||
                 !sourceHeight ||
                 !rgba
             ) {
+
                 return json({
+
                     error:
                         "Decoder returned invalid image data",
 
                     sourceWidth,
                     sourceHeight,
 
-                    hasPixelData:
-                        !!rgba
+                    pixelBytes:
+                        rgba
+                            ? rgba.length
+                            : 0
+
                 }, 500);
             }
 
-            // -----------------------------
-            // Limit output resolution
-            // -----------------------------
 
-            const scale = Math.min(
-                1,
-                MAX_SIZE / sourceWidth,
-                MAX_SIZE / sourceHeight
-            );
+            /*
+             * The normalized RGBA buffer MUST contain exactly
+             * width * height * 4 bytes.
+             */
 
-            const width = Math.max(
-                1,
-                Math.floor(
-                    sourceWidth * scale
-                )
-            );
+            const expectedRGBABytes =
+                sourceWidth *
+                sourceHeight *
+                4;
 
-            const height = Math.max(
-                1,
-                Math.floor(
-                    sourceHeight * scale
-                )
-            );
 
-            // -----------------------------
-            // Convert pixels
-            // -----------------------------
+            if (
+                rgba.length !==
+                expectedRGBABytes
+            ) {
+
+                return json({
+
+                    error:
+                        "RGBA conversion produced an invalid size",
+
+                    sourceWidth,
+                    sourceHeight,
+
+                    expectedBytes:
+                        expectedRGBABytes,
+
+                    actualBytes:
+                        rgba.length
+
+                }, 500);
+            }
+
+
+            // ==================================================
+            // RESIZE / SAMPLE
+            // ==================================================
+
+            const scale =
+                Math.min(
+                    1,
+                    MAX_SIZE /
+                        sourceWidth,
+                    MAX_SIZE /
+                        sourceHeight
+                );
+
+
+            const width =
+                Math.max(
+                    1,
+                    Math.floor(
+                        sourceWidth *
+                        scale
+                    )
+                );
+
+
+            const height =
+                Math.max(
+                    1,
+                    Math.floor(
+                        sourceHeight *
+                        scale
+                    )
+                );
+
+
+            // --------------------------------------------------
+            // OUTPUT PIXELS
+            // --------------------------------------------------
 
             const pixels = [];
 
-            for (let y = 0; y < height; y++) {
+
+            for (
+                let y = 0;
+                y < height;
+                y++
+            ) {
 
                 const row = [];
 
-                for (let x = 0; x < width; x++) {
 
-                    const sourceX = Math.min(
-                        sourceWidth - 1,
-                        Math.floor(x / scale)
-                    );
+                for (
+                    let x = 0;
+                    x < width;
+                    x++
+                ) {
 
-                    const sourceY = Math.min(
-                        sourceHeight - 1,
-                        Math.floor(y / scale)
-                    );
+                    /*
+                     * Map the output pixel back to the
+                     * original image.
+                     */
+
+                    const sourceX =
+                        Math.min(
+                            sourceWidth - 1,
+
+                            Math.floor(
+                                x / scale
+                            )
+                        );
+
+
+                    const sourceY =
+                        Math.min(
+                            sourceHeight - 1,
+
+                            Math.floor(
+                                y / scale
+                            )
+                        );
+
 
                     const index =
                         (
@@ -364,6 +745,13 @@ export default {
                             sourceWidth +
                             sourceX
                         ) * 4;
+
+
+                    /*
+                     * Because rgba was normalized above,
+                     * these four values are guaranteed to
+                     * exist.
+                     */
 
                     row.push([
                         rgba[index],
@@ -373,14 +761,59 @@ export default {
                     ]);
                 }
 
+
                 pixels.push(row);
             }
 
-            // -----------------------------
-            // Return result
-            // -----------------------------
+
+            // --------------------------------------------------
+            // FINAL NULL CHECK
+            // --------------------------------------------------
+
+            for (
+                let y = 0;
+                y < pixels.length;
+                y++
+            ) {
+
+                for (
+                    let x = 0;
+                    x < pixels[y].length;
+                    x++
+                ) {
+
+                    const pixel =
+                        pixels[y][x];
+
+                    if (
+                        pixel[0] === undefined ||
+                        pixel[1] === undefined ||
+                        pixel[2] === undefined ||
+                        pixel[3] === undefined
+                    ) {
+
+                        return json({
+
+                            error:
+                                "Internal pixel conversion error",
+
+                            x,
+                            y,
+
+                            pixel
+
+                        }, 500);
+                    }
+                }
+            }
+
+
+            // ==================================================
+            // RESPONSE
+            // ==================================================
 
             return json({
+
                 success: true,
 
                 originalWidth:
@@ -393,18 +826,22 @@ export default {
                 height,
 
                 pixels
+
             });
+
 
         } catch (error) {
 
             console.error(error);
 
             return json({
+
                 error:
                     "Failed to process image",
 
                 details:
                     String(error)
+
             }, 500);
         }
     }
