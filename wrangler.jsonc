@@ -2,6 +2,5 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "roblox-image-pixels",
   "main": "src/index.js",
-  "compatibility_date": "2026-09-29",
-  "compatibility_flags": ["nodejs_compat"]
+  "compatibility_date": "2026-09-29"
 }
