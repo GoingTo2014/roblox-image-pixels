@@ -1,4 +1,4 @@
-import { PNG } from "pngjs";
+import { decode } from "@cf-wasm/png/workerd";
 import jpeg from "jpeg-js";
 
 const MAX_BYTES = 5 * 1024 * 1024;
@@ -24,7 +24,6 @@ function json(data, status = 200) {
 export default {
   async fetch(request) {
 
-    // Browser CORS preflight
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -32,7 +31,6 @@ export default {
       });
     }
 
-    // Test the Worker by opening its URL
     if (request.method === "GET") {
       return json({
         success: true,
@@ -47,8 +45,6 @@ export default {
     }
 
     try {
-
-      // Read request body
       const body = await request.json();
 
       if (!body.url || typeof body.url !== "string") {
@@ -57,31 +53,15 @@ export default {
         }, 400);
       }
 
-      // Parse URL
-      let imageURL;
+      const imageURL = new URL(body.url);
 
-      try {
-        imageURL = new URL(body.url);
-      } catch {
-        return json({
-          error: "Invalid image URL"
-        }, 400);
-      }
-
-      // Only allow HTTPS
       if (imageURL.protocol !== "https:") {
         return json({
           error: "HTTPS URLs only"
         }, 400);
       }
 
-      /*
-       * Fetch the image.
-       *
-       * Discord CDN URLs are supported here.
-       */
       const imageResponse = await fetch(imageURL.toString(), {
-        method: "GET",
         headers: {
           "User-Agent": "Mozilla/5.0"
         }
@@ -95,76 +75,76 @@ export default {
         }, 400);
       }
 
-      // Determine image type
       const contentType =
         (imageResponse.headers.get("content-type") || "")
           .split(";")[0]
           .trim()
           .toLowerCase();
 
-      if (
-        contentType !== "image/png" &&
-        contentType !== "image/jpeg"
-      ) {
-        return json({
-          error: "Unsupported image type",
-          contentType: contentType || "unknown"
-        }, 415);
-      }
-
-      // Download image
       const buffer = await imageResponse.arrayBuffer();
 
       if (buffer.byteLength > MAX_BYTES) {
         return json({
-          error: "Image is too large",
-          bytes: buffer.byteLength
+          error: "Image is too large"
         }, 413);
       }
 
-      let decoded;
+      let sourceWidth;
+      let sourceHeight;
+      let rgba;
 
-      // PNG
+      /*
+       * PNG
+       */
       if (contentType === "image/png") {
 
-        const png = PNG.sync.read(
-          Buffer.from(buffer)
-        );
+        const png = decode(buffer);
 
-        decoded = {
-          width: png.width,
-          height: png.height,
-          data: png.data
-        };
+        sourceWidth = png.width;
+        sourceHeight = png.height;
+
+        rgba = png.data;
       }
 
-      // JPEG
-      else if (contentType === "image/jpeg") {
+      /*
+       * JPEG
+       */
+      else if (
+        contentType === "image/jpeg" ||
+        contentType === "image/jpg"
+      ) {
 
-        decoded = jpeg.decode(
+        const jpegImage = jpeg.decode(
           new Uint8Array(buffer),
           {
             useTArray: true,
             formatAsRGBA: true
           }
         );
+
+        sourceWidth = jpegImage.width;
+        sourceHeight = jpegImage.height;
+
+        rgba = jpegImage.data;
+      }
+
+      else {
+        return json({
+          error: "Unsupported image type",
+          contentType: contentType || "unknown"
+        }, 415);
       }
 
       if (
-        !decoded ||
-        !decoded.width ||
-        !decoded.height ||
-        !decoded.data
+        !sourceWidth ||
+        !sourceHeight ||
+        !rgba
       ) {
         return json({
-          error: "Image decoder returned invalid data"
+          error: "Decoder returned invalid image data"
         }, 500);
       }
 
-      const sourceWidth = decoded.width;
-      const sourceHeight = decoded.height;
-
-      // Keep output small enough for testing
       const scale = Math.min(
         1,
         MAX_SIZE / sourceWidth,
@@ -203,10 +183,10 @@ export default {
             (sourceY * sourceWidth + sourceX) * 4;
 
           row.push([
-            decoded.data[index],
-            decoded.data[index + 1],
-            decoded.data[index + 2],
-            decoded.data[index + 3]
+            rgba[index],
+            rgba[index + 1],
+            rgba[index + 2],
+            rgba[index + 3]
           ]);
         }
 
@@ -215,19 +195,16 @@ export default {
 
       return json({
         success: true,
-
         originalWidth: sourceWidth,
         originalHeight: sourceHeight,
-
-        width: width,
-        height: height,
-
-        pixels: pixels
+        width,
+        height,
+        pixels
       });
 
     } catch (error) {
 
-      console.error("IMAGE PROCESSING ERROR:", error);
+      console.error(error);
 
       return json({
         error: "Failed to process image",
