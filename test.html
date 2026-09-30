@@ -1,46 +1,89 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Roblox Image Pixel Test</title>
+</head>
+
 <body>
 
-<h2>Roblox Image Pixel Test</h2>
+<h1>Roblox Image Pixel Test</h1>
 
-<input id="url" size="80"
-       placeholder="Paste an image URL here">
+<p>Enter a direct PNG or JPEG image URL:</p>
 
-<button onclick="test()">Test</button>
+<input
+    id="url"
+    type="text"
+    size="80"
+    placeholder="https://cdn.discordapp.com/..."
+>
 
-<pre id="output"></pre>
+<button id="testButton">Test Image</button>
+
+<pre id="output">Waiting...</pre>
 
 <script>
-async function test() {
-    const url = document.getElementById("url").value;
-    const output = document.getElementById("output");
+const WORKER_URL = "https://roblox-image-pixels.s92676513.workers.dev";
 
-    output.textContent = "Loading...";
+const urlInput = document.getElementById("url");
+const testButton = document.getElementById("testButton");
+const output = document.getElementById("output");
+
+testButton.addEventListener("click", testImage);
+
+async function testImage() {
+    const imageUrl = urlInput.value.trim();
+
+    if (!imageUrl) {
+        output.textContent = "Please enter an image URL.";
+        return;
+    }
+
+    output.textContent = "Sending request...";
 
     try {
-        const response = await fetch(
-            "https://roblox-image-pixels.s92676513.workers.dev",
-            {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    url: url
-                })
-            }
-        );
+        const response = await fetch(WORKER_URL, {
+            method: "POST",
 
-        const text = await response.text();
+            headers: {
+                "Content-Type": "application/json"
+            },
+
+            body: JSON.stringify({
+                url: imageUrl
+            })
+        });
+
+        const responseText = await response.text();
 
         output.textContent =
-            "HTTP " + response.status + "\n\n" +
-            text;
+            "HTTP Status: " +
+            response.status +
+            "\n\n" +
+            responseText;
+
+        // Try to format JSON nicely
+        try {
+            const data = JSON.parse(responseText);
+
+            output.textContent =
+                "HTTP Status: " +
+                response.status +
+                "\n\n" +
+                JSON.stringify(data, null, 2);
+
+        } catch {
+            // Response wasn't JSON.
+            // The raw response is already displayed above.
+        }
 
     } catch (error) {
         output.textContent =
-            "Error: " + error;
+            "REQUEST FAILED\n\n" +
+            error.toString() +
+            "\n\n" +
+            "Worker URL:\n" +
+            WORKER_URL;
     }
 }
 </script>
