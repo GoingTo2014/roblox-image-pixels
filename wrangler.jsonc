@@ -6,5 +6,9 @@
 
   "images": {
     "binding": "IMAGES"
+  },
+
+  "cache": {
+    "enabled": true
   }
 }
