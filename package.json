@@ -1,11 +1,10 @@
 {
   "name": "roblox-image-pixels",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
   "dependencies": {
     "@cf-wasm/png": "^0.4.0",
-    "@hpcc-js/wasm-zstd": "^1.16.1",
     "jpeg-js": "^0.4.4"
   },
   "devDependencies": {
