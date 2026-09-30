@@ -2,9 +2,7 @@ import { decode } from "@cf-wasm/png/workerd";
 import jpeg from "jpeg-js";
 
 const MAX_BYTES = 5 * 1024 * 1024;
-
-// Maximum output dimension.
-const MAX_SIZE_LIMIT = 1024;
+const MAX_SIZE = 1024;
 
 const CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
@@ -50,17 +48,11 @@ function isJPEG(bytes) {
 }
 
 /*
- * Convert an 8-bit PNG into RGBA8.
- *
- * Supported PNG color types:
- *
- * 0 = grayscale
- * 2 = RGB
- * 4 = grayscale + alpha
- * 6 = RGBA
- *
- * Palette/indexed PNGs (type 3) are intentionally not handled
- * here, matching the currently working version of your Worker.
+ * Convert PNG decoder output to RGBA8.
+
+ * The Cloudflare image transformation normally gives us
+ * an already-small image, so this function only has to deal
+ * with the transformed image rather than the original source.
  */
 function pngToRGBA(png) {
     const width = png.width;
@@ -69,7 +61,8 @@ function pngToRGBA(png) {
 
     const colorType = png.colorType;
     const bitDepth = png.bitDepth;
-    const lineSize = png.lineSize;
+    const lineSize =
+        png.lineSize || 0;
 
     if (!source) {
         throw new Error(
@@ -86,328 +79,256 @@ function pngToRGBA(png) {
     if (bitDepth !== 8) {
         throw new Error(
             "Unsupported PNG bit depth: " +
-            bitDepth +
-            ". Only 8-bit PNGs are currently supported."
+            bitDepth
         );
-    }
-
-    let channels;
-
-    switch (colorType) {
-        case 0:
-            channels = 1;
-            break;
-
-        case 2:
-            channels = 3;
-            break;
-
-        case 4:
-            channels = 2;
-            break;
-
-        case 6:
-            channels = 4;
-            break;
-
-        default:
-            throw new Error(
-                "Unsupported PNG color type: " +
-                colorType
-            );
-    }
-
-    const expectedLineSize =
-        width * channels;
-
-    const actualLineSize =
-        lineSize || expectedLineSize;
-
-    if (
-        actualLineSize <
-        expectedLineSize
-    ) {
-        throw new Error(
-            "PNG line size is too small. " +
-            "Expected at least " +
-            expectedLineSize +
-            ", got " +
-            actualLineSize
-        );
-    }
-
-    const rgba =
-        new Uint8Array(
-            width *
-            height *
-            4
-        );
-
-    for (
-        let y = 0;
-        y < height;
-        y++
-    ) {
-        const sourceRowStart =
-            y * actualLineSize;
-
-        const outputRowStart =
-            y * width * 4;
-
-        for (
-            let x = 0;
-            x < width;
-            x++
-        ) {
-            const sourceIndex =
-                sourceRowStart +
-                x * channels;
-
-            const outputIndex =
-                outputRowStart +
-                x * 4;
-
-            if (
-                sourceIndex +
-                channels >
-                source.length
-            ) {
-                throw new Error(
-                    "PNG pixel data ended unexpectedly at " +
-                    x +
-                    "," +
-                    y
-                );
-            }
-
-            if (colorType === 0) {
-                const gray =
-                    source[sourceIndex];
-
-                rgba[outputIndex] =
-                    gray;
-
-                rgba[outputIndex + 1] =
-                    gray;
-
-                rgba[outputIndex + 2] =
-                    gray;
-
-                rgba[outputIndex + 3] =
-                    255;
-
-            } else if (colorType === 2) {
-                rgba[outputIndex] =
-                    source[sourceIndex];
-
-                rgba[outputIndex + 1] =
-                    source[sourceIndex + 1];
-
-                rgba[outputIndex + 2] =
-                    source[sourceIndex + 2];
-
-                rgba[outputIndex + 3] =
-                    255;
-
-            } else if (colorType === 4) {
-                const gray =
-                    source[sourceIndex];
-
-                const alpha =
-                    source[sourceIndex + 1];
-
-                rgba[outputIndex] =
-                    gray;
-
-                rgba[outputIndex + 1] =
-                    gray;
-
-                rgba[outputIndex + 2] =
-                    gray;
-
-                rgba[outputIndex + 3] =
-                    alpha;
-
-            } else if (colorType === 6) {
-                rgba[outputIndex] =
-                    source[sourceIndex];
-
-                rgba[outputIndex + 1] =
-                    source[sourceIndex + 1];
-
-                rgba[outputIndex + 2] =
-                    source[sourceIndex + 2];
-
-                rgba[outputIndex + 3] =
-                    source[sourceIndex + 3];
-            }
-        }
-    }
-
-    return rgba;
-}
-
-/*
- * Resize to fit inside maxSize × maxSize.
- *
- * If every output pixel is fully opaque, return RGB instead
- * of RGBA. This saves 25% of the raw data immediately.
- */
-function resizePixels(
-    rgba,
-    sourceWidth,
-    sourceHeight,
-    maxSize
-) {
-    const scale =
-        Math.min(
-            1,
-            maxSize / sourceWidth,
-            maxSize / sourceHeight
-        );
-
-    const width =
-        Math.max(
-            1,
-            Math.floor(
-                sourceWidth * scale
-            )
-        );
-
-    const height =
-        Math.max(
-            1,
-            Math.floor(
-                sourceHeight * scale
-            )
-        );
-
-    const rgbaOutput =
-        new Uint8Array(
-            width *
-            height *
-            4
-        );
-
-    let opaque = true;
-
-    for (
-        let y = 0;
-        y < height;
-        y++
-    ) {
-        const sourceY =
-            Math.min(
-                sourceHeight - 1,
-                Math.floor(
-                    y / scale
-                )
-            );
-
-        for (
-            let x = 0;
-            x < width;
-            x++
-        ) {
-            const sourceX =
-                Math.min(
-                    sourceWidth - 1,
-                    Math.floor(
-                        x / scale
-                    )
-                );
-
-            const sourceIndex =
-                (
-                    sourceY *
-                    sourceWidth +
-                    sourceX
-                ) * 4;
-
-            const outputIndex =
-                (
-                    y *
-                    width +
-                    x
-                ) * 4;
-
-            rgbaOutput[outputIndex] =
-                rgba[sourceIndex];
-
-            rgbaOutput[outputIndex + 1] =
-                rgba[sourceIndex + 1];
-
-            rgbaOutput[outputIndex + 2] =
-                rgba[sourceIndex + 2];
-
-            rgbaOutput[outputIndex + 3] =
-                rgba[sourceIndex + 3];
-
-            if (
-                rgba[sourceIndex + 3] !==
-                255
-            ) {
-                opaque = false;
-            }
-        }
     }
 
     /*
-     * Opaque image:
-     * RGBA → RGB
+     * Fast path:
+     *
+     * color type 6 = RGBA.
+     *
+     * The decoder already gave us exactly what
+     * EditableImage ultimately needs.
      */
-    if (opaque) {
-        const rgb =
-            new Uint8Array(
-                width *
-                height *
-                3
+    if (colorType === 6) {
+        const expected =
+            width *
+            height *
+            4;
+
+        if (source.length !== expected) {
+            throw new Error(
+                "RGBA PNG has invalid pixel data size. " +
+                "Expected " +
+                expected +
+                ", got " +
+                source.length
             );
-
-        let sourceIndex = 0;
-        let outputIndex = 0;
-
-        while (
-            sourceIndex <
-            rgbaOutput.length
-        ) {
-            rgb[outputIndex++] =
-                rgbaOutput[sourceIndex++];
-
-            rgb[outputIndex++] =
-                rgbaOutput[sourceIndex++];
-
-            rgb[outputIndex++] =
-                rgbaOutput[sourceIndex++];
-
-            // Skip alpha.
-            sourceIndex++;
         }
 
         return {
             width,
             height,
-            channels: 3,
-            pixels: rgb
+            channels: 4,
+            pixels: source
         };
     }
 
     /*
-     * Transparent image:
-     * keep RGBA.
+     * RGB PNG.
+     *
+     * Convert RGB → RGBA.
      */
-    return {
-        width,
-        height,
-        channels: 4,
-        pixels: rgbaOutput
-    };
+    if (colorType === 2) {
+        const sourceLineSize =
+            lineSize ||
+            width * 3;
+
+        const rgba =
+            new Uint8Array(
+                width *
+                height *
+                4
+            );
+
+        /*
+         * One loop is required here because
+         * we need to insert alpha bytes.
+         */
+        for (
+            let y = 0;
+            y < height;
+            y++
+        ) {
+            const sourceRow =
+                y *
+                sourceLineSize;
+
+            const outputRow =
+                y *
+                width *
+                4;
+
+            for (
+                let x = 0;
+                x < width;
+                x++
+            ) {
+                const sourceIndex =
+                    sourceRow +
+                    x * 3;
+
+                const outputIndex =
+                    outputRow +
+                    x * 4;
+
+                rgba[outputIndex] =
+                    source[sourceIndex];
+
+                rgba[outputIndex + 1] =
+                    source[sourceIndex + 1];
+
+                rgba[outputIndex + 2] =
+                    source[sourceIndex + 2];
+
+                rgba[outputIndex + 3] =
+                    255;
+            }
+        }
+
+        return {
+            width,
+            height,
+            channels: 4,
+            pixels: rgba
+        };
+    }
+
+    /*
+     * Grayscale PNG.
+     */
+    if (colorType === 0) {
+        const sourceLineSize =
+            lineSize ||
+            width;
+
+        const rgba =
+            new Uint8Array(
+                width *
+                height *
+                4
+            );
+
+        for (
+            let y = 0;
+            y < height;
+            y++
+        ) {
+            const sourceRow =
+                y *
+                sourceLineSize;
+
+            const outputRow =
+                y *
+                width *
+                4;
+
+            for (
+                let x = 0;
+                x < width;
+                x++
+            ) {
+                const gray =
+                    source[
+                        sourceRow + x
+                    ];
+
+                const outputIndex =
+                    outputRow +
+                    x * 4;
+
+                rgba[outputIndex] =
+                    gray;
+
+                rgba[outputIndex + 1] =
+                    gray;
+
+                rgba[outputIndex + 2] =
+                    gray;
+
+                rgba[outputIndex + 3] =
+                    255;
+            }
+        }
+
+        return {
+            width,
+            height,
+            channels: 4,
+            pixels: rgba
+        };
+    }
+
+    /*
+     * Grayscale + alpha PNG.
+     */
+    if (colorType === 4) {
+        const sourceLineSize =
+            lineSize ||
+            width * 2;
+
+        const rgba =
+            new Uint8Array(
+                width *
+                height *
+                4
+            );
+
+        for (
+            let y = 0;
+            y < height;
+            y++
+        ) {
+            const sourceRow =
+                y *
+                sourceLineSize;
+
+            const outputRow =
+                y *
+                width *
+                4;
+
+            for (
+                let x = 0;
+                x < width;
+                x++
+            ) {
+                const sourceIndex =
+                    sourceRow +
+                    x * 2;
+
+                const outputIndex =
+                    outputRow +
+                    x * 4;
+
+                const gray =
+                    source[sourceIndex];
+
+                rgba[outputIndex] =
+                    gray;
+
+                rgba[outputIndex + 1] =
+                    gray;
+
+                rgba[outputIndex + 2] =
+                    gray;
+
+                rgba[outputIndex + 3] =
+                    source[
+                        sourceIndex + 1
+                    ];
+            }
+        }
+
+        return {
+            width,
+            height,
+            channels: 4,
+            pixels: rgba
+        };
+    }
+
+    throw new Error(
+        "Unsupported PNG color type: " +
+        colorType
+    );
 }
 
 export default {
     async fetch(request) {
         /*
-         * CORS preflight
+         * CORS preflight.
          */
         if (
             request.method ===
@@ -424,7 +345,7 @@ export default {
         }
 
         /*
-         * Health check
+         * Health check.
          */
         if (
             request.method ===
@@ -435,14 +356,16 @@ export default {
                 message:
                     "Roblox image pixel Worker is online!",
                 maxSize:
-                    MAX_SIZE_LIMIT,
+                    MAX_SIZE,
                 outputFormat:
-                    "raw-binary-rgb-rgba"
+                    "raw-rgba-binary",
+                imageTransformation:
+                    true
             });
         }
 
         /*
-         * Image processing is POST only.
+         * Only POST is accepted.
          */
         if (
             request.method !==
@@ -458,11 +381,14 @@ export default {
         }
 
         try {
+            /*
+             * Parse request.
+             */
             const body =
                 await request.json();
 
             /*
-             * Validate URL.
+             * Validate image URL.
              */
             if (
                 !body.url ||
@@ -507,99 +433,159 @@ export default {
             }
 
             /*
-             * Requested output size.
+             * Requested maximum output size.
              *
-             * Always clamp it server-side.
+             * Server always clamps this to 1024.
              */
-            const requestedSize =
-                Number(body.maxSize);
-
-            const maxSize =
-                Number.isFinite(
-                    requestedSize
-                )
-                    ? Math.max(
-                        1,
-                        Math.min(
-                            MAX_SIZE_LIMIT,
-                            Math.floor(
-                                requestedSize
-                            )
-                        )
-                    )
-                    : MAX_SIZE_LIMIT;
-
-            /*
-             * Download image.
-             */
-            const imageResponse =
-                await fetch(
-                    imageURL.toString(),
-                    {
-                        headers: {
-                            "User-Agent":
-                                "Mozilla/5.0",
-
-                            "Accept":
-                                "image/png,image/jpeg,image/*,*/*"
-                        }
-                    }
+            let requestedSize =
+                Number(
+                    body.maxSize
                 );
 
+            if (
+                !Number.isFinite(
+                    requestedSize
+                )
+            ) {
+                requestedSize =
+                    MAX_SIZE;
+            }
+
+            const maxSize =
+                Math.max(
+                    1,
+                    Math.min(
+                        MAX_SIZE,
+                        Math.floor(
+                            requestedSize
+                        )
+                    )
+                );
+
+            /*
+             * IMPORTANT:
+             *
+             * Cloudflare performs the resizing here.
+             *
+             * The Worker does NOT download the huge
+             * original and resize it in JavaScript.
+             */
+            let imageResponse;
+
+            try {
+                imageResponse =
+                    await fetch(
+                        imageURL.toString(),
+                        {
+                            headers: {
+                                "User-Agent":
+                                    "Mozilla/5.0",
+
+                                "Accept":
+                                    "image/png,image/jpeg,image/*,*/*"
+                            },
+
+                            cf: {
+                                image: {
+                                    width:
+                                        maxSize,
+
+                                    height:
+                                        maxSize,
+
+                                    fit:
+                                        "scale-down",
+
+                                    format:
+                                        "png",
+
+                                    metadata:
+                                        "none"
+                                }
+                            }
+                        }
+                    );
+            } catch (error) {
+                return json(
+                    {
+                        error:
+                            "Cloudflare image transformation failed",
+
+                        details:
+                            String(error)
+                    },
+                    502
+                );
+            }
+
+            /*
+             * Do not fall back to the original image.
+             *
+             * Falling back could bring the huge source image
+             * back into the Worker and recreate the resource
+             * problem we're trying to avoid.
+             */
             if (
                 !imageResponse.ok
             ) {
                 return json(
                     {
                         error:
-                            "Image request failed: HTTP " +
-                            imageResponse.status
+                            "Image transformation request failed",
+
+                        status:
+                            imageResponse.status,
+
+                        statusText:
+                            imageResponse.statusText
                     },
                     400
                 );
             }
 
-            const contentType =
-                (
-                    imageResponse.headers.get(
-                        "content-type"
-                    ) || ""
-                )
-                    .split(";")[0]
-                    .trim()
-                    .toLowerCase();
-
-            const arrayBuffer =
+            /*
+             * Get transformed image bytes.
+             *
+             * At this point Cloudflare should already have
+             * reduced the dimensions to <= 1024×1024.
+             */
+            const transformedBuffer =
                 await imageResponse.arrayBuffer();
 
-            const bytes =
+            const transformedBytes =
                 new Uint8Array(
-                    arrayBuffer
+                    transformedBuffer
                 );
 
             if (
-                bytes.length === 0
+                transformedBytes.length === 0
             ) {
                 return json(
                     {
                         error:
-                            "Image response was empty"
+                            "Transformed image was empty"
                     },
                     400
                 );
             }
 
+            /*
+             * Safety limit for the transformed image.
+             *
+             * 1024×1024 RGBA is about 4 MB, so 5 MB gives
+             * enough room without allowing something enormous.
+             */
             if (
-                bytes.length >
+                transformedBytes.length >
                 MAX_BYTES
             ) {
                 return json(
                     {
                         error:
-                            "Image is too large",
+                            "Transformed image is too large",
 
                         downloadedBytes:
-                            bytes.length,
+                            transformedBytes.length,
 
                         maxBytes:
                             MAX_BYTES
@@ -609,251 +595,200 @@ export default {
             }
 
             /*
-             * Determine image format.
+             * Detect the format produced by Cloudflare.
              */
-            const actualPNG =
-                isPNG(bytes);
+            const transformedIsPNG =
+                isPNG(
+                    transformedBytes
+                );
 
-            const actualJPEG =
-                isJPEG(bytes);
+            const transformedIsJPEG =
+                isJPEG(
+                    transformedBytes
+                );
 
-            let sourceWidth;
-            let sourceHeight;
-            let rgba;
+            let width;
+            let height;
+            let channels;
+            let pixels;
 
             /*
-             * PNG
+             * PNG path.
+             *
+             * Cloudflare was asked for PNG, so this
+             * should be the normal path.
              */
-            if (actualPNG) {
+            if (transformedIsPNG) {
                 try {
                     const png =
-                        decode(bytes);
+                        decode(
+                            transformedBytes
+                        );
 
-                    sourceWidth =
-                        png.width;
-
-                    sourceHeight =
-                        png.height;
-
-                    rgba =
+                    const decoded =
                         pngToRGBA(png);
+
+                    width =
+                        decoded.width;
+
+                    height =
+                        decoded.height;
+
+                    channels =
+                        decoded.channels;
+
+                    pixels =
+                        decoded.pixels;
 
                 } catch (error) {
                     return json(
                         {
                             error:
-                                "PNG decoding failed",
+                                "Transformed PNG decoding failed",
 
                             details:
-                                String(error),
-
-                            contentType,
-
-                            downloadedBytes:
-                                bytes.length
+                                String(error)
                         },
                         500
                     );
                 }
 
             /*
-             * JPEG
+             * JPEG fallback.
              */
-            } else if (actualJPEG) {
+            } else if (
+                transformedIsJPEG
+            ) {
                 try {
-                    const jpegImage =
+                    const decoded =
                         jpeg.decode(
-                            bytes,
+                            transformedBytes,
                             {
-                                useTArray: true,
-                                formatAsRGBA: true
+                                useTArray:
+                                    true,
+
+                                formatAsRGBA:
+                                    true
                             }
                         );
 
-                    sourceWidth =
-                        jpegImage.width;
+                    width =
+                        decoded.width;
 
-                    sourceHeight =
-                        jpegImage.height;
+                    height =
+                        decoded.height;
 
-                    rgba =
-                        jpegImage.data;
+                    channels =
+                        4;
+
+                    pixels =
+                        decoded.data;
 
                 } catch (error) {
                     return json(
                         {
                             error:
-                                "JPEG decoding failed",
+                                "Transformed JPEG decoding failed",
 
                             details:
-                                String(error),
-
-                            contentType,
-
-                            downloadedBytes:
-                                bytes.length
+                                String(error)
                         },
                         500
                     );
                 }
 
-            /*
-             * Unsupported format
-             */
             } else {
-                let preview = "";
-
-                try {
-                    preview =
-                        new TextDecoder()
-                            .decode(
-                                bytes.slice(
-                                    0,
-                                    200
-                                )
-                            );
-                } catch {
-                    preview = "";
-                }
-
                 return json(
                     {
                         error:
-                            "Downloaded file is not a PNG or JPEG",
+                            "Cloudflare returned an unsupported image format",
 
                         contentType:
-                            contentType ||
-                            "unknown",
-
-                        downloadedBytes:
-                            bytes.length,
-
-                        firstBytes:
-                            Array.from(
-                                bytes.slice(
-                                    0,
-                                    16
-                                )
-                            ),
-
-                        responsePreview:
-                            preview
+                            imageResponse.headers.get(
+                                "content-type"
+                            ) || "unknown"
                     },
                     415
                 );
             }
 
             /*
-             * Validate decoded image.
+             * Final validation.
              */
             if (
-                !sourceWidth ||
-                !sourceHeight ||
-                !rgba
+                !width ||
+                !height ||
+                !pixels
             ) {
                 return json(
                     {
                         error:
-                            "Decoder returned invalid image data",
-
-                        sourceWidth,
-                        sourceHeight
+                            "Decoder returned invalid image data"
                     },
                     500
                 );
             }
 
-            const expectedRGBABytes =
-                sourceWidth *
-                sourceHeight *
-                4;
-
             if (
-                rgba.length !==
-                expectedRGBABytes
+                width > MAX_SIZE ||
+                height > MAX_SIZE
             ) {
                 return json(
                     {
                         error:
-                            "RGBA conversion produced an invalid size",
+                            "Cloudflare returned an image larger than the limit",
 
-                        sourceWidth,
-                        sourceHeight,
+                        width,
+                        height,
+                        maxSize:
+                            MAX_SIZE
+                    },
+                    500
+                );
+            }
 
-                        expectedBytes:
-                            expectedRGBABytes,
+            const expectedBytes =
+                width *
+                height *
+                channels;
+
+            if (
+                pixels.length !==
+                expectedBytes
+            ) {
+                return json(
+                    {
+                        error:
+                            "Pixel buffer has an invalid size",
+
+                        width,
+                        height,
+                        channels,
+
+                        expectedBytes,
 
                         actualBytes:
-                            rgba.length
+                            pixels.length
                     },
                     500
                 );
             }
 
             /*
-             * Resize and convert opaque images
-             * from RGBA to RGB.
-             */
-            const resized =
-                resizePixels(
-                    rgba,
-                    sourceWidth,
-                    sourceHeight,
-                    maxSize
-                );
-
-            /*
-             * Verify the resulting size.
-             */
-            const expectedOutputBytes =
-                resized.width *
-                resized.height *
-                resized.channels;
-
-            if (
-                resized.pixels.length !==
-                expectedOutputBytes
-            ) {
-                return json(
-                    {
-                        error:
-                            "Internal resize produced an invalid pixel buffer",
-
-                        width:
-                            resized.width,
-
-                        height:
-                            resized.height,
-
-                        channels:
-                            resized.channels,
-
-                        expectedBytes:
-                            expectedOutputBytes,
-
-                        actualBytes:
-                            resized.pixels.length
-                    },
-                    500
-                );
-            }
-
-            /*
-             * IMPORTANT:
+             * Return raw binary pixels.
              *
-             * Return the raw binary buffer.
+             * NO:
+             *   gzip
+             *   base64
+             *   JSON pixel arrays
+             *   Content-Encoding
              *
-             * No gzip.
-             * No base64.
-             * No JSON pixels.
-             * No Content-Encoding.
-             *
-             * The Roblox server will receive these exact
-             * pixel bytes and compress them with native
-             * Roblox Zstandard afterward.
+             * Roblox's server script will put these bytes
+             * into a buffer and compress them with native
+             * Roblox Zstandard before sending them to the client.
              */
             return new Response(
-                resized.pixels,
+                pixels,
                 {
                     status: 200,
 
@@ -866,29 +801,24 @@ export default {
                         "Cache-Control":
                             "no-store",
 
-                        "Content-Length":
-                            String(
-                                resized.pixels.length
-                            ),
-
                         "X-Image-Width":
                             String(
-                                resized.width
+                                width
                             ),
 
                         "X-Image-Height":
                             String(
-                                resized.height
+                                height
                             ),
 
                         "X-Image-Channels":
                             String(
-                                resized.channels
+                                channels
                             ),
 
                         "X-Image-Raw-Bytes":
                             String(
-                                resized.pixels.length
+                                pixels.length
                             ),
 
                         "X-Image-Compression":
