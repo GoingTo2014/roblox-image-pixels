@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "pngjs": "^7.0.0",
+    "@cf-wasm/png": "^0.4.0",
     "jpeg-js": "^0.4.4"
   },
   "devDependencies": {
