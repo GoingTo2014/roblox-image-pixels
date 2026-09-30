@@ -1,0 +1,13 @@
+{
+  "name": "roblox-image-pixels",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "pngjs": "^7.0.0",
+    "jpeg-js": "^0.4.4"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
