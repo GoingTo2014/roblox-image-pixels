@@ -21,6 +21,29 @@ function json(data, status = 200) {
   });
 }
 
+function isPNG(bytes) {
+  return (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4E &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0D &&
+    bytes[5] === 0x0A &&
+    bytes[6] === 0x1A &&
+    bytes[7] === 0x0A
+  );
+}
+
+function isJPEG(bytes) {
+  return (
+    bytes.length >= 3 &&
+    bytes[0] === 0xFF &&
+    bytes[1] === 0xD8 &&
+    bytes[2] === 0xFF
+  );
+}
+
 export default {
   async fetch(request) {
 
@@ -53,7 +76,15 @@ export default {
         }, 400);
       }
 
-      const imageURL = new URL(body.url);
+      let imageURL;
+
+      try {
+        imageURL = new URL(body.url);
+      } catch {
+        return json({
+          error: "Invalid URL"
+        }, 400);
+      }
 
       if (imageURL.protocol !== "https:") {
         return json({
@@ -63,7 +94,8 @@ export default {
 
       const imageResponse = await fetch(imageURL.toString(), {
         headers: {
-          "User-Agent": "Mozilla/5.0"
+          "User-Agent": "Mozilla/5.0",
+          "Accept": "image/png,image/jpeg,image/*,*/*"
         }
       });
 
@@ -82,56 +114,96 @@ export default {
           .toLowerCase();
 
       const buffer = await imageResponse.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
 
-      if (buffer.byteLength > MAX_BYTES) {
+      if (bytes.length === 0) {
         return json({
-          error: "Image is too large"
+          error: "Image response was empty"
+        }, 400);
+      }
+
+      if (bytes.length > MAX_BYTES) {
+        return json({
+          error: "Image is too large",
+          bytes: bytes.length,
+          maxBytes: MAX_BYTES
         }, 413);
       }
+
+      /*
+       * Detect the actual file format from its magic bytes.
+       * This is more reliable than Content-Type alone.
+       */
+
+      const actualPNG = isPNG(bytes);
+      const actualJPEG = isJPEG(bytes);
 
       let sourceWidth;
       let sourceHeight;
       let rgba;
 
-      /*
-       * PNG
-       */
-      if (contentType === "image/png") {
+      if (actualPNG) {
 
-        const png = decode(buffer);
+        try {
 
-        sourceWidth = png.width;
-        sourceHeight = png.height;
+          const png = decode(buffer);
 
-        rgba = png.data;
-      }
+          sourceWidth = png.width;
+          sourceHeight = png.height;
+          rgba = png.data;
 
-      /*
-       * JPEG
-       */
-      else if (
-        contentType === "image/jpeg" ||
-        contentType === "image/jpg"
-      ) {
+        } catch (error) {
 
-        const jpegImage = jpeg.decode(
-          new Uint8Array(buffer),
-          {
-            useTArray: true,
-            formatAsRGBA: true
-          }
-        );
+          return json({
+            error: "PNG decoding failed",
+            details: String(error),
+            contentType,
+            downloadedBytes: bytes.length
+          }, 500);
+        }
 
-        sourceWidth = jpegImage.width;
-        sourceHeight = jpegImage.height;
+      } else if (actualJPEG) {
 
-        rgba = jpegImage.data;
-      }
+        try {
 
-      else {
+          const jpegImage = jpeg.decode(
+            bytes,
+            {
+              useTArray: true,
+              formatAsRGBA: true
+            }
+          );
+
+          sourceWidth = jpegImage.width;
+          sourceHeight = jpegImage.height;
+          rgba = jpegImage.data;
+
+        } catch (error) {
+
+          return json({
+            error: "JPEG decoding failed",
+            details: String(error),
+            contentType,
+            downloadedBytes: bytes.length
+          }, 500);
+        }
+
+      } else {
+
+        /*
+         * The URL may claim to be an image, but the returned
+         * bytes aren't actually PNG or JPEG.
+         */
+
+        const preview = new TextDecoder()
+          .decode(bytes.slice(0, 200));
+
         return json({
-          error: "Unsupported image type",
-          contentType: contentType || "unknown"
+          error: "Downloaded file is not a PNG or JPEG",
+          contentType: contentType || "unknown",
+          downloadedBytes: bytes.length,
+          firstBytes: Array.from(bytes.slice(0, 16)),
+          responsePreview: preview
         }, 415);
       }
 
@@ -144,6 +216,10 @@ export default {
           error: "Decoder returned invalid image data"
         }, 500);
       }
+
+      /*
+       * Keep the returned pixel data small enough for Roblox.
+       */
 
       const scale = Math.min(
         1,
@@ -195,10 +271,13 @@ export default {
 
       return json({
         success: true,
+
         originalWidth: sourceWidth,
         originalHeight: sourceHeight,
+
         width,
         height,
+
         pixels
       });
 
