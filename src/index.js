@@ -4,21 +4,45 @@ import jpeg from "jpeg-js";
 const MAX_BYTES = 5 * 1024 * 1024;
 const MAX_SIZE = 64;
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Max-Age": "86400"
+};
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*"
+      ...CORS_HEADERS,
+      "Content-Type": "application/json"
     }
   });
 }
 
 export default {
   async fetch(request) {
+
+    // Handle browser CORS preflight
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: CORS_HEADERS
+      });
+    }
+
+    // Simple GET test
+    if (request.method === "GET") {
+      return json({
+        success: true,
+        message: "Roblox image pixel Worker is online!"
+      });
+    }
+
     if (request.method !== "POST") {
       return json({
-        error: "Send a POST request containing { url: '...' }"
+        error: "POST requests only"
       }, 405);
     }
 
@@ -26,7 +50,9 @@ export default {
       const body = await request.json();
 
       if (!body.url || typeof body.url !== "string") {
-        return json({ error: "Missing image URL" }, 400);
+        return json({
+          error: "Missing image URL"
+        }, 400);
       }
 
       let imageURL;
@@ -34,23 +60,29 @@ export default {
       try {
         imageURL = new URL(body.url);
       } catch {
-        return json({ error: "Invalid URL" }, 400);
+        return json({
+          error: "Invalid image URL"
+        }, 400);
       }
 
       if (imageURL.protocol !== "https:") {
-        return json({ error: "HTTPS URLs only" }, 400);
+        return json({
+          error: "HTTPS URLs only"
+        }, 400);
       }
 
-      const response = await fetch(imageURL);
+      const imageResponse = await fetch(imageURL);
 
-      if (!response.ok) {
+      if (!imageResponse.ok) {
         return json({
-          error: `Image request failed: HTTP ${response.status}`
+          error:
+            "Image request failed: HTTP " +
+            imageResponse.status
         }, 400);
       }
 
       const contentType =
-        (response.headers.get("content-type") || "")
+        (imageResponse.headers.get("content-type") || "")
           .split(";")[0]
           .toLowerCase();
 
@@ -59,35 +91,56 @@ export default {
         contentType !== "image/jpeg"
       ) {
         return json({
-          error: `Unsupported image type: ${contentType || "unknown"}`
+          error:
+            "Unsupported image type: " +
+            (contentType || "unknown")
         }, 415);
       }
 
-      const buffer = await response.arrayBuffer();
+      const buffer = await imageResponse.arrayBuffer();
 
       if (buffer.byteLength > MAX_BYTES) {
-        return json({ error: "Image is too large" }, 413);
+        return json({
+          error: "Image is too large"
+        }, 413);
       }
 
       let decoded;
 
       if (contentType === "image/png") {
-        const png = PNG.sync.read(Buffer.from(buffer));
+        const png = PNG.sync.read(
+          Buffer.from(buffer)
+        );
 
         decoded = {
           width: png.width,
           height: png.height,
           data: png.data
         };
+
       } else {
-        decoded = jpeg.decode(new Uint8Array(buffer), {
-          useTArray: true,
-          formatAsRGBA: true
-        });
+        decoded = jpeg.decode(
+          new Uint8Array(buffer),
+          {
+            useTArray: true,
+            formatAsRGBA: true
+          }
+        );
       }
 
       const sourceWidth = decoded.width;
       const sourceHeight = decoded.height;
+
+      if (
+        !sourceWidth ||
+        !sourceHeight ||
+        sourceWidth <= 0 ||
+        sourceHeight <= 0
+      ) {
+        return json({
+          error: "Invalid image dimensions"
+        }, 400);
+      }
 
       const scale = Math.min(
         1,
@@ -108,9 +161,11 @@ export default {
       const pixels = [];
 
       for (let y = 0; y < height; y++) {
+
         const row = [];
 
         for (let x = 0; x < width; x++) {
+
           const sourceX = Math.min(
             sourceWidth - 1,
             Math.floor(x / scale)
@@ -137,14 +192,20 @@ export default {
 
       return json({
         success: true,
+
         originalWidth: sourceWidth,
         originalHeight: sourceHeight,
-        width,
-        height,
-        pixels
+
+        width: width,
+        height: height,
+
+        pixels: pixels
       });
 
     } catch (error) {
+
+      console.error(error);
+
       return json({
         error: "Failed to process image"
       }, 500);
