@@ -24,7 +24,7 @@ function json(data, status = 200) {
 export default {
   async fetch(request) {
 
-    // Handle browser CORS preflight
+    // Browser CORS preflight
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -32,7 +32,7 @@ export default {
       });
     }
 
-    // Simple GET test
+    // Test the Worker by opening its URL
     if (request.method === "GET") {
       return json({
         success: true,
@@ -47,6 +47,8 @@ export default {
     }
 
     try {
+
+      // Read request body
       const body = await request.json();
 
       if (!body.url || typeof body.url !== "string") {
@@ -55,6 +57,7 @@ export default {
         }, 400);
       }
 
+      // Parse URL
       let imageURL;
 
       try {
@@ -65,13 +68,24 @@ export default {
         }, 400);
       }
 
+      // Only allow HTTPS
       if (imageURL.protocol !== "https:") {
         return json({
           error: "HTTPS URLs only"
         }, 400);
       }
 
-      const imageResponse = await fetch(imageURL);
+      /*
+       * Fetch the image.
+       *
+       * Discord CDN URLs are supported here.
+       */
+      const imageResponse = await fetch(imageURL.toString(), {
+        method: "GET",
+        headers: {
+          "User-Agent": "Mozilla/5.0"
+        }
+      });
 
       if (!imageResponse.ok) {
         return json({
@@ -81,9 +95,11 @@ export default {
         }, 400);
       }
 
+      // Determine image type
       const contentType =
         (imageResponse.headers.get("content-type") || "")
           .split(";")[0]
+          .trim()
           .toLowerCase();
 
       if (
@@ -91,23 +107,26 @@ export default {
         contentType !== "image/jpeg"
       ) {
         return json({
-          error:
-            "Unsupported image type: " +
-            (contentType || "unknown")
+          error: "Unsupported image type",
+          contentType: contentType || "unknown"
         }, 415);
       }
 
+      // Download image
       const buffer = await imageResponse.arrayBuffer();
 
       if (buffer.byteLength > MAX_BYTES) {
         return json({
-          error: "Image is too large"
+          error: "Image is too large",
+          bytes: buffer.byteLength
         }, 413);
       }
 
       let decoded;
 
+      // PNG
       if (contentType === "image/png") {
+
         const png = PNG.sync.read(
           Buffer.from(buffer)
         );
@@ -117,8 +136,11 @@ export default {
           height: png.height,
           data: png.data
         };
+      }
 
-      } else {
+      // JPEG
+      else if (contentType === "image/jpeg") {
+
         decoded = jpeg.decode(
           new Uint8Array(buffer),
           {
@@ -128,20 +150,21 @@ export default {
         );
       }
 
+      if (
+        !decoded ||
+        !decoded.width ||
+        !decoded.height ||
+        !decoded.data
+      ) {
+        return json({
+          error: "Image decoder returned invalid data"
+        }, 500);
+      }
+
       const sourceWidth = decoded.width;
       const sourceHeight = decoded.height;
 
-      if (
-        !sourceWidth ||
-        !sourceHeight ||
-        sourceWidth <= 0 ||
-        sourceHeight <= 0
-      ) {
-        return json({
-          error: "Invalid image dimensions"
-        }, 400);
-      }
-
+      // Keep output small enough for testing
       const scale = Math.min(
         1,
         MAX_SIZE / sourceWidth,
@@ -204,10 +227,11 @@ export default {
 
     } catch (error) {
 
-      console.error(error);
+      console.error("IMAGE PROCESSING ERROR:", error);
 
       return json({
-        error: "Failed to process image"
+        error: "Failed to process image",
+        details: String(error)
       }, 500);
     }
   }
