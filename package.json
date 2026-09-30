@@ -1,10 +1,14 @@
 {
+  "$schema": "node_modules/wrangler/config-schema.json",
   "name": "roblox-image-pixels",
-  "version": "3.0.0",
-  "private": true,
-  "type": "module",
-  "dependencies": {},
-  "devDependencies": {
-    "wrangler": "^4.0.0"
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-29",
+
+  "images": {
+    "binding": "IMAGES"
+  },
+
+  "cache": {
+    "enabled": true
   }
 }
