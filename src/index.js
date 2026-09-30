@@ -1,4 +1,4 @@
-import { decode } from "@cf-wasm/png/workerd";
+import { decode } from "@cf-wasm/png";
 
 const MAX_SIZE = 1024;
 const MAX_SOURCE_BYTES = 20 * 1024 * 1024;
