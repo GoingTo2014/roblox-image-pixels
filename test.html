@@ -32,10 +32,11 @@ async function test() {
             }
         );
 
-        const data = await response.json();
+        const text = await response.text();
 
         output.textContent =
-            JSON.stringify(data, null, 2);
+            "HTTP " + response.status + "\n\n" +
+            text;
 
     } catch (error) {
         output.textContent =
