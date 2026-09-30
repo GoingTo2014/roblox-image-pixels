@@ -1,8 +1,8 @@
-import { decode } from "@cf-wasm/png/workerd";
-import jpeg from "jpeg-js";
-
-const MAX_BYTES = 5 * 1024 * 1024;
 const MAX_SIZE = 1024;
+
+// Cloudflare Images binding currently accepts up to 20 MB
+// for direct image input.
+const MAX_SOURCE_BYTES = 20 * 1024 * 1024;
 
 const CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
@@ -24,303 +24,42 @@ function json(data, status = 200) {
     );
 }
 
-function isPNG(bytes) {
-    return (
-        bytes.length >= 8 &&
-        bytes[0] === 0x89 &&
-        bytes[1] === 0x50 &&
-        bytes[2] === 0x4E &&
-        bytes[3] === 0x47 &&
-        bytes[4] === 0x0D &&
-        bytes[5] === 0x0A &&
-        bytes[6] === 0x1A &&
-        bytes[7] === 0x0A
-    );
-}
-
-function isJPEG(bytes) {
-    return (
-        bytes.length >= 3 &&
-        bytes[0] === 0xFF &&
-        bytes[1] === 0xD8 &&
-        bytes[2] === 0xFF
-    );
-}
-
-/*
- * Convert an 8-bit PNG into RGBA8.
-
- * Supported color types:
- *
- * 0 = grayscale
- * 2 = RGB
- * 4 = grayscale + alpha
- * 6 = RGBA
- */
-function pngToRGBA(png) {
-    const width = png.width;
-    const height = png.height;
-    const source = png.image;
-
-    const colorType = png.colorType;
-    const bitDepth = png.bitDepth;
-    const lineSize = png.lineSize || 0;
-
-    if (!source) {
-        throw new Error(
-            "PNG decoder returned no image data"
+function calculateOutputSize(
+    sourceWidth,
+    sourceHeight,
+    maxSize
+) {
+    const scale =
+        Math.min(
+            1,
+            maxSize / sourceWidth,
+            maxSize / sourceHeight
         );
-    }
 
-    if (!width || !height) {
-        throw new Error(
-            "PNG decoder returned invalid dimensions"
+    const width =
+        Math.max(
+            1,
+            Math.floor(
+                sourceWidth * scale
+            )
         );
-    }
 
-    if (bitDepth !== 8) {
-        throw new Error(
-            "Unsupported PNG bit depth: " +
-            bitDepth +
-            ". Only 8-bit PNGs are currently supported."
+    const height =
+        Math.max(
+            1,
+            Math.floor(
+                sourceHeight * scale
+            )
         );
-    }
 
-    /*
-     * RGBA PNG:
-     * decoder already gives us exactly the
-     * byte layout we want.
-     */
-    if (colorType === 6) {
-        const expected =
-            width *
-            height *
-            4;
-
-        if (source.length !== expected) {
-            throw new Error(
-                "RGBA PNG has invalid pixel data size. " +
-                "Expected " +
-                expected +
-                ", got " +
-                source.length
-            );
-        }
-
-        return {
-            width,
-            height,
-            channels: 4,
-            pixels: source
-        };
-    }
-
-    /*
-     * RGB PNG.
-     */
-    if (colorType === 2) {
-        const sourceLineSize =
-            lineSize ||
-            width * 3;
-
-        const rgba =
-            new Uint8Array(
-                width *
-                height *
-                4
-            );
-
-        for (
-            let y = 0;
-            y < height;
-            y++
-        ) {
-            const sourceRow =
-                y *
-                sourceLineSize;
-
-            const outputRow =
-                y *
-                width *
-                4;
-
-            for (
-                let x = 0;
-                x < width;
-                x++
-            ) {
-                const sourceIndex =
-                    sourceRow +
-                    x * 3;
-
-                const outputIndex =
-                    outputRow +
-                    x * 4;
-
-                rgba[outputIndex] =
-                    source[sourceIndex];
-
-                rgba[outputIndex + 1] =
-                    source[sourceIndex + 1];
-
-                rgba[outputIndex + 2] =
-                    source[sourceIndex + 2];
-
-                rgba[outputIndex + 3] =
-                    255;
-            }
-        }
-
-        return {
-            width,
-            height,
-            channels: 4,
-            pixels: rgba
-        };
-    }
-
-    /*
-     * Grayscale PNG.
-     */
-    if (colorType === 0) {
-        const sourceLineSize =
-            lineSize ||
-            width;
-
-        const rgba =
-            new Uint8Array(
-                width *
-                height *
-                4
-            );
-
-        for (
-            let y = 0;
-            y < height;
-            y++
-        ) {
-            const sourceRow =
-                y *
-                sourceLineSize;
-
-            const outputRow =
-                y *
-                width *
-                4;
-
-            for (
-                let x = 0;
-                x < width;
-                x++
-            ) {
-                const gray =
-                    source[
-                        sourceRow + x
-                    ];
-
-                const outputIndex =
-                    outputRow +
-                    x * 4;
-
-                rgba[outputIndex] =
-                    gray;
-
-                rgba[outputIndex + 1] =
-                    gray;
-
-                rgba[outputIndex + 2] =
-                    gray;
-
-                rgba[outputIndex + 3] =
-                    255;
-            }
-        }
-
-        return {
-            width,
-            height,
-            channels: 4,
-            pixels: rgba
-        };
-    }
-
-    /*
-     * Grayscale + alpha PNG.
-     */
-    if (colorType === 4) {
-        const sourceLineSize =
-            lineSize ||
-            width * 2;
-
-        const rgba =
-            new Uint8Array(
-                width *
-                height *
-                4
-            );
-
-        for (
-            let y = 0;
-            y < height;
-            y++
-        ) {
-            const sourceRow =
-                y *
-                sourceLineSize;
-
-            const outputRow =
-                y *
-                width *
-                4;
-
-            for (
-                let x = 0;
-                x < width;
-                x++
-            ) {
-                const sourceIndex =
-                    sourceRow +
-                    x * 2;
-
-                const outputIndex =
-                    outputRow +
-                    x * 4;
-
-                const gray =
-                    source[sourceIndex];
-
-                rgba[outputIndex] =
-                    gray;
-
-                rgba[outputIndex + 1] =
-                    gray;
-
-                rgba[outputIndex + 2] =
-                    gray;
-
-                rgba[outputIndex + 3] =
-                    source[
-                        sourceIndex + 1
-                    ];
-            }
-        }
-
-        return {
-            width,
-            height,
-            channels: 4,
-            pixels: rgba
-        };
-    }
-
-    throw new Error(
-        "Unsupported PNG color type: " +
-        colorType
-    );
+    return {
+        width,
+        height
+    };
 }
 
 export default {
-    async fetch(request) {
+    async fetch(request, env) {
         /*
          * CORS preflight.
          */
@@ -347,17 +86,26 @@ export default {
         ) {
             return json({
                 success: true,
+
                 message:
                     "Roblox image pixel Worker is online!",
+
                 maxSize:
                     MAX_SIZE,
-                supportedInputs: [
-                    "PNG",
-                    "JPEG",
-                    "WebP"
-                ],
+
                 outputFormat:
-                    "raw-rgba-binary",
+                    "raw-rgba",
+
+                supportedImages:
+                    [
+                        "PNG",
+                        "JPEG",
+                        "WebP",
+                        "GIF",
+                        "SVG",
+                        "HEIC"
+                    ],
+
                 animatedImages:
                     "first-frame-only"
             });
@@ -380,11 +128,34 @@ export default {
         }
 
         try {
+            /*
+             * Make sure the Images binding exists.
+             */
+            if (
+                !env.IMAGES ||
+                typeof env.IMAGES.input !==
+                    "function"
+            ) {
+                return json(
+                    {
+                        error:
+                            "Cloudflare Images binding is not configured",
+
+                        details:
+                            "Add an images binding named IMAGES to wrangler.jsonc"
+                    },
+                    500
+                );
+            }
+
+            /*
+             * Parse JSON request.
+             */
             const body =
                 await request.json();
 
             /*
-             * Validate URL.
+             * Validate image URL.
              */
             if (
                 !body.url ||
@@ -415,6 +186,9 @@ export default {
                 );
             }
 
+            /*
+             * Only HTTPS sources.
+             */
             if (
                 imageURL.protocol !==
                 "https:"
@@ -429,7 +203,7 @@ export default {
             }
 
             /*
-             * Parse requested size.
+             * Requested size.
              */
             let requestedSize =
                 Number(
@@ -457,56 +231,193 @@ export default {
                 );
 
             /*
-             * Ask Cloudflare to:
+             * Fetch the original image.
              *
-             * 1. Fetch the source image.
-             * 2. Resize it to <= maxSize.
-             * 3. Preserve aspect ratio.
-             * 4. Convert it to PNG.
-             * 5. For animated WebP/GIF, only use
-             *    the first frame.
+             * We intentionally do NOT read the entire
+             * image into an ArrayBuffer here.
              *
-             * This means our Worker never has to decode
-             * the huge original WebP.
+             * It gets streamed directly into the
+             * Cloudflare Images binding.
              */
-            let imageResponse;
+            const sourceResponse =
+                await fetch(
+                    imageURL.toString(),
+                    {
+                        headers: {
+                            "User-Agent":
+                                "Mozilla/5.0",
+
+                            "Accept":
+                                "image/png,image/jpeg,image/webp,image/gif,image/*,*/*"
+                        }
+                    }
+                );
+
+            if (
+                !sourceResponse.ok
+            ) {
+                return json(
+                    {
+                        error:
+                            "Image request failed: HTTP " +
+                            sourceResponse.status
+                    },
+                    400
+                );
+            }
+
+            if (
+                !sourceResponse.body
+            ) {
+                return json(
+                    {
+                        error:
+                            "Image response did not contain a body"
+                    },
+                    400
+                );
+            }
+
+            /*
+             * Check Content-Length when available.
+             *
+             * This prevents obviously oversized inputs
+             * from entering the Images binding.
+             */
+            const contentLength =
+                Number(
+                    sourceResponse.headers.get(
+                        "content-length"
+                    )
+                );
+
+            if (
+                Number.isFinite(
+                    contentLength
+                ) &&
+                contentLength >
+                    MAX_SOURCE_BYTES
+            ) {
+                return json(
+                    {
+                        error:
+                            "Source image is too large",
+
+                        downloadedBytes:
+                            contentLength,
+
+                        maxBytes:
+                            MAX_SOURCE_BYTES
+                    },
+                    413
+                );
+            }
+
+            /*
+             * We need the original dimensions so Roblox
+             * knows exactly how large the resulting buffer is.
+             *
+             * Clone the response so one stream is used for
+             * metadata and the other is sent to the transform.
+             */
+            let originalInfo;
 
             try {
-                imageResponse =
-                    await fetch(
-                        imageURL.toString(),
-                        {
-                            headers: {
-                                "User-Agent":
-                                    "Mozilla/5.0",
+                const infoResponse =
+                    sourceResponse.clone();
 
-                                "Accept":
-                                    "image/png,image/jpeg,image/webp,image/*,*/*"
-                            },
-
-                            cf: {
-                                image: {
-                                    width:
-                                        maxSize,
-
-                                    height:
-                                        maxSize,
-
-                                    fit:
-                                        "scale-down",
-
-                                    format:
-                                        "png",
-
-                                    anim:
-                                        false,
-
-                                    metadata:
-                                        "none"
-                                }
-                            }
-                        }
+                originalInfo =
+                    await env.IMAGES.info(
+                        infoResponse.body
                     );
+
+            } catch (error) {
+                return json(
+                    {
+                        error:
+                            "Cloudflare could not identify the image",
+
+                        details:
+                            String(error)
+                    },
+                    415
+                );
+            }
+
+            if (
+                !originalInfo ||
+                typeof originalInfo.width !==
+                    "number" ||
+                typeof originalInfo.height !==
+                    "number"
+            ) {
+                return json(
+                    {
+                        error:
+                            "Cloudflare returned invalid image dimensions"
+                    },
+                    500
+                );
+            }
+
+            /*
+             * Calculate the dimensions that the
+             * scale-down transformation will produce.
+             */
+            const outputSize =
+                calculateOutputSize(
+                    originalInfo.width,
+                    originalInfo.height,
+                    maxSize
+                );
+
+            const width =
+                outputSize.width;
+
+            const height =
+                outputSize.height;
+
+            /*
+             * Transform the image using Cloudflare Images.
+             *
+             * Crucially, the output format is "rgba".
+             *
+             * This means Cloudflare gives us the raw
+             * RGBA pixel buffer directly.
+             *
+             * WebP therefore requires no WebP decoder.
+             * PNG requires no PNG decoder.
+             * JPEG requires no JPEG decoder.
+             *
+             * anim:false means an animated WebP/GIF is
+             * reduced to its first frame.
+             */
+            let transformation;
+
+            try {
+                transformation =
+                    await env.IMAGES
+                        .input(
+                            sourceResponse.body
+                        )
+                        .transform({
+                            width:
+                                maxSize,
+
+                            height:
+                                maxSize,
+
+                            fit:
+                                "scale-down"
+                        })
+                        .output({
+                            format:
+                                "rgba",
+
+                            anim:
+                                false
+                        });
+
             } catch (error) {
                 return json(
                     {
@@ -516,117 +427,26 @@ export default {
                         details:
                             String(error)
                     },
-                    502
+                    500
                 );
             }
 
             /*
-             * Never fall back to the original source.
-             *
-             * That would defeat the resource optimization.
+             * Get the raw RGBA stream.
              */
-            if (
-                !imageResponse.ok
-            ) {
-                return json(
-                    {
-                        error:
-                            "Image transformation request failed",
-
-                        status:
-                            imageResponse.status,
-
-                        statusText:
-                            imageResponse.statusText
-                    },
-                    400
-                );
-            }
-
-            /*
-             * Get the transformed PNG.
-             *
-             * WebP is already converted to PNG here.
-             */
-            const transformedBuffer =
-                await imageResponse.arrayBuffer();
-
-            const transformedBytes =
-                new Uint8Array(
-                    transformedBuffer
-                );
-
-            if (
-                transformedBytes.length === 0
-            ) {
-                return json(
-                    {
-                        error:
-                            "Transformed image was empty"
-                    },
-                    400
-                );
-            }
-
-            /*
-             * Safety limit.
-             */
-            if (
-                transformedBytes.length >
-                MAX_BYTES
-            ) {
-                return json(
-                    {
-                        error:
-                            "Transformed image is too large",
-
-                        downloadedBytes:
-                            transformedBytes.length,
-
-                        maxBytes:
-                            MAX_BYTES
-                    },
-                    413
-                );
-            }
-
-            /*
-             * We explicitly requested PNG.
-             */
-            if (
-                !isPNG(
-                    transformedBytes
-                )
-            ) {
-                return json(
-                    {
-                        error:
-                            "Cloudflare did not return the expected PNG output",
-
-                        contentType:
-                            imageResponse.headers.get(
-                                "content-type"
-                            ) || "unknown"
-                    },
-                    415
-                );
-            }
-
-            /*
-             * Decode the already-resized PNG.
-             */
-            let png;
+            let rgbaBuffer;
 
             try {
-                png =
-                    decode(
-                        transformedBytes
-                    );
+                rgbaBuffer =
+                    await new Response(
+                        transformation.image()
+                    ).arrayBuffer();
+
             } catch (error) {
                 return json(
                     {
                         error:
-                            "PNG decoding failed",
+                            "Could not read transformed image",
 
                         details:
                             String(error)
@@ -634,84 +454,25 @@ export default {
                     500
                 );
             }
-
-            /*
-             * Convert to RGBA pixel bytes.
-             */
-            let decoded;
-
-            try {
-                decoded =
-                    pngToRGBA(
-                        png
-                    );
-            } catch (error) {
-                return json(
-                    {
-                        error:
-                            "PNG pixel conversion failed",
-
-                        details:
-                            String(error)
-                    },
-                    500
-                );
-            }
-
-            const width =
-                decoded.width;
-
-            const height =
-                decoded.height;
-
-            const channels =
-                decoded.channels;
 
             const pixels =
-                decoded.pixels;
+                new Uint8Array(
+                    rgbaBuffer
+                );
 
             /*
-             * Final dimensions check.
-             */
-            if (
-                width < 1 ||
-                height < 1
-            ) {
-                return json(
-                    {
-                        error:
-                            "Invalid transformed image dimensions"
-                    },
-                    500
-                );
-            }
-
-            if (
-                width > MAX_SIZE ||
-                height > MAX_SIZE
-            ) {
-                return json(
-                    {
-                        error:
-                            "Transformed image exceeds maximum dimensions",
-
-                        width,
-                        height,
-                        maxSize:
-                            MAX_SIZE
-                    },
-                    500
-                );
-            }
-
-            /*
-             * Final buffer-size check.
+             * RGBA = 4 bytes per pixel.
              */
             const expectedBytes =
                 width *
                 height *
-                channels;
+                4;
 
+            /*
+             * The calculated dimensions normally match
+             * exactly. If they don't, give a useful error
+             * instead of sending corrupted data to Roblox.
+             */
             if (
                 pixels.length !==
                 expectedBytes
@@ -719,13 +480,22 @@ export default {
                 return json(
                     {
                         error:
-                            "Pixel buffer has an invalid size",
+                            "Cloudflare returned an unexpected RGBA buffer size",
 
-                        width,
-                        height,
-                        channels,
+                        originalWidth:
+                            originalInfo.width,
 
-                        expectedBytes,
+                        originalHeight:
+                            originalInfo.height,
+
+                        calculatedWidth:
+                            width,
+
+                        calculatedHeight:
+                            height,
+
+                        expectedBytes:
+                            expectedBytes,
 
                         actualBytes:
                             pixels.length
@@ -735,19 +505,21 @@ export default {
             }
 
             /*
-             * Return raw binary pixels.
+             * IMPORTANT:
              *
-             * No:
-             * - JSON pixel arrays
-             * - Base64
-             * - gzip
-             * - WASM compression
-             * - Content-Encoding
+             * Return raw bytes.
+             *
+             * We explicitly disable automatic response
+             * encoding so Cloudflare does not gzip/brotli
+             * the binary pixel data behind our backs.
              */
             return new Response(
                 pixels,
                 {
                     status: 200,
+
+                    encodeBody:
+                        "manual",
 
                     headers: {
                         ...CORS_HEADERS,
@@ -769,9 +541,7 @@ export default {
                             ),
 
                         "X-Image-Channels":
-                            String(
-                                channels
-                            ),
+                            "4",
 
                         "X-Image-Raw-Bytes":
                             String(
@@ -779,7 +549,10 @@ export default {
                             ),
 
                         "X-Image-Compression":
-                            "none"
+                            "none",
+
+                        "X-Image-Format":
+                            "rgba"
                     }
                 }
             );
