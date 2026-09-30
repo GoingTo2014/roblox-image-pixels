@@ -1,7 +1,6 @@
-const MAX_SIZE = 1024;
+import { decode } from "@cf-wasm/png/workerd";
 
-// Cloudflare Images binding currently accepts up to 20 MB
-// for direct image input.
+const MAX_SIZE = 1024;
 const MAX_SOURCE_BYTES = 20 * 1024 * 1024;
 
 const CORS_HEADERS = {
@@ -24,37 +23,331 @@ function json(data, status = 200) {
     );
 }
 
-function calculateOutputSize(
-    sourceWidth,
-    sourceHeight,
-    maxSize
+function pngToRGBA(png) {
+    const width = png.width;
+    const height = png.height;
+    const source = png.image;
+
+    const colorType = png.colorType;
+    const bitDepth = png.bitDepth;
+    const lineSize =
+        png.lineSize || 0;
+
+    if (!source) {
+        throw new Error(
+            "PNG decoder returned no image data"
+        );
+    }
+
+    if (!width || !height) {
+        throw new Error(
+            "PNG decoder returned invalid dimensions"
+        );
+    }
+
+    if (bitDepth !== 8) {
+        throw new Error(
+            "Unsupported PNG bit depth: " +
+            bitDepth
+        );
+    }
+
+    /*
+     * RGBA PNG.
+     *
+     * This is the fastest path because the decoder's
+     * pixel buffer is already RGBA8.
+     */
+    if (colorType === 6) {
+        const expected =
+            width *
+            height *
+            4;
+
+        if (source.length !== expected) {
+            throw new Error(
+                "RGBA PNG pixel data has an invalid size. " +
+                "Expected " +
+                expected +
+                ", got " +
+                source.length
+            );
+        }
+
+        return {
+            width,
+            height,
+            channels: 4,
+            pixels: source
+        };
+    }
+
+    /*
+     * RGB PNG -> RGBA.
+     */
+    if (colorType === 2) {
+        const sourceLineSize =
+            lineSize ||
+            width * 3;
+
+        const rgba =
+            new Uint8Array(
+                width *
+                height *
+                4
+            );
+
+        for (
+            let y = 0;
+            y < height;
+            y++
+        ) {
+            const sourceRow =
+                y *
+                sourceLineSize;
+
+            const outputRow =
+                y *
+                width *
+                4;
+
+            for (
+                let x = 0;
+                x < width;
+                x++
+            ) {
+                const sourceIndex =
+                    sourceRow +
+                    x * 3;
+
+                const outputIndex =
+                    outputRow +
+                    x * 4;
+
+                rgba[outputIndex] =
+                    source[sourceIndex];
+
+                rgba[outputIndex + 1] =
+                    source[sourceIndex + 1];
+
+                rgba[outputIndex + 2] =
+                    source[sourceIndex + 2];
+
+                rgba[outputIndex + 3] =
+                    255;
+            }
+        }
+
+        return {
+            width,
+            height,
+            channels: 4,
+            pixels: rgba
+        };
+    }
+
+    /*
+     * Grayscale PNG -> RGBA.
+     */
+    if (colorType === 0) {
+        const sourceLineSize =
+            lineSize ||
+            width;
+
+        const rgba =
+            new Uint8Array(
+                width *
+                height *
+                4
+            );
+
+        for (
+            let y = 0;
+            y < height;
+            y++
+        ) {
+            const sourceRow =
+                y *
+                sourceLineSize;
+
+            const outputRow =
+                y *
+                width *
+                4;
+
+            for (
+                let x = 0;
+                x < width;
+                x++
+            ) {
+                const gray =
+                    source[
+                        sourceRow + x
+                    ];
+
+                const outputIndex =
+                    outputRow +
+                    x * 4;
+
+                rgba[outputIndex] =
+                    gray;
+
+                rgba[outputIndex + 1] =
+                    gray;
+
+                rgba[outputIndex + 2] =
+                    gray;
+
+                rgba[outputIndex + 3] =
+                    255;
+            }
+        }
+
+        return {
+            width,
+            height,
+            channels: 4,
+            pixels: rgba
+        };
+    }
+
+    /*
+     * Grayscale + alpha PNG -> RGBA.
+     */
+    if (colorType === 4) {
+        const sourceLineSize =
+            lineSize ||
+            width * 2;
+
+        const rgba =
+            new Uint8Array(
+                width *
+                height *
+                4
+            );
+
+        for (
+            let y = 0;
+            y < height;
+            y++
+        ) {
+            const sourceRow =
+                y *
+                sourceLineSize;
+
+            const outputRow =
+                y *
+                width *
+                4;
+
+            for (
+                let x = 0;
+                x < width;
+                x++
+            ) {
+                const sourceIndex =
+                    sourceRow +
+                    x * 2;
+
+                const outputIndex =
+                    outputRow +
+                    x * 4;
+
+                const gray =
+                    source[sourceIndex];
+
+                rgba[outputIndex] =
+                    gray;
+
+                rgba[outputIndex + 1] =
+                    gray;
+
+                rgba[outputIndex + 2] =
+                    gray;
+
+                rgba[outputIndex + 3] =
+                    source[
+                        sourceIndex + 1
+                    ];
+            }
+        }
+
+        return {
+            width,
+            height,
+            channels: 4,
+            pixels: rgba
+        };
+    }
+
+    throw new Error(
+        "Unsupported PNG color type: " +
+        colorType
+    );
+}
+
+/*
+ * Convert fully-opaque RGBA to RGB.
+ *
+ * This is optional bandwidth optimization.
+ */
+function rgbaToRGBIfOpaque(
+    rgba,
+    width,
+    height
 ) {
-    const scale =
-        Math.min(
-            1,
-            maxSize / sourceWidth,
-            maxSize / sourceHeight
+    let opaque = true;
+
+    /*
+     * First determine whether we actually need alpha.
+     */
+    for (
+        let i = 3;
+        i < rgba.length;
+        i += 4
+    ) {
+        if (rgba[i] !== 255) {
+            opaque = false;
+            break;
+        }
+    }
+
+    if (!opaque) {
+        return {
+            channels: 4,
+            pixels: rgba
+        };
+    }
+
+    const rgb =
+        new Uint8Array(
+            width *
+            height *
+            3
         );
 
-    const width =
-        Math.max(
-            1,
-            Math.floor(
-                sourceWidth * scale
-            )
-        );
+    let sourceIndex = 0;
+    let outputIndex = 0;
 
-    const height =
-        Math.max(
-            1,
-            Math.floor(
-                sourceHeight * scale
-            )
-        );
+    while (
+        sourceIndex <
+        rgba.length
+    ) {
+        rgb[outputIndex++] =
+            rgba[sourceIndex++];
+
+        rgb[outputIndex++] =
+            rgba[sourceIndex++];
+
+        rgb[outputIndex++] =
+            rgba[sourceIndex++];
+
+        sourceIndex++;
+    }
 
     return {
-        width,
-        height
+        channels: 3,
+        pixels: rgb
     };
 }
 
@@ -93,18 +386,17 @@ export default {
                 maxSize:
                     MAX_SIZE,
 
-                outputFormat:
-                    "raw-rgba",
+                supportedInputs: [
+                    "PNG",
+                    "JPEG",
+                    "WebP",
+                    "GIF",
+                    "SVG",
+                    "HEIC"
+                ],
 
-                supportedImages:
-                    [
-                        "PNG",
-                        "JPEG",
-                        "WebP",
-                        "GIF",
-                        "SVG",
-                        "HEIC"
-                    ],
+                outputFormat:
+                    "raw-rgb-rgba-binary",
 
                 animatedImages:
                     "first-frame-only"
@@ -129,7 +421,7 @@ export default {
 
         try {
             /*
-             * Make sure the Images binding exists.
+             * Verify the Images binding.
              */
             if (
                 !env.IMAGES ||
@@ -139,23 +431,20 @@ export default {
                 return json(
                     {
                         error:
-                            "Cloudflare Images binding is not configured",
-
-                        details:
-                            "Add an images binding named IMAGES to wrangler.jsonc"
+                            "Cloudflare Images binding is not configured"
                     },
                     500
                 );
             }
 
             /*
-             * Parse JSON request.
+             * Parse request.
              */
             const body =
                 await request.json();
 
             /*
-             * Validate image URL.
+             * Validate URL.
              */
             if (
                 !body.url ||
@@ -186,9 +475,6 @@ export default {
                 );
             }
 
-            /*
-             * Only HTTPS sources.
-             */
             if (
                 imageURL.protocol !==
                 "https:"
@@ -203,7 +489,7 @@ export default {
             }
 
             /*
-             * Requested size.
+             * Requested resolution.
              */
             let requestedSize =
                 Number(
@@ -231,13 +517,7 @@ export default {
                 );
 
             /*
-             * Fetch the original image.
-             *
-             * We intentionally do NOT read the entire
-             * image into an ArrayBuffer here.
-             *
-             * It gets streamed directly into the
-             * Cloudflare Images binding.
+             * Download source image.
              */
             const sourceResponse =
                 await fetch(
@@ -279,10 +559,8 @@ export default {
             }
 
             /*
-             * Check Content-Length when available.
-             *
-             * This prevents obviously oversized inputs
-             * from entering the Images binding.
+             * Reject obviously huge files before sending them
+             * into the Images binding.
              */
             const contentLength =
                 Number(
@@ -314,88 +592,18 @@ export default {
             }
 
             /*
-             * We need the original dimensions so Roblox
-             * knows exactly how large the resulting buffer is.
+             * Cloudflare performs the resize.
              *
-             * Clone the response so one stream is used for
-             * metadata and the other is sent to the transform.
+             * WebP/JPEG/PNG/etc. are converted to PNG.
+             * Animated images become one still frame.
+             *
+             * We deliberately DO NOT calculate the resulting
+             * dimensions ourselves.
              */
-            let originalInfo;
+            let transformed;
 
             try {
-                const infoResponse =
-                    sourceResponse.clone();
-
-                originalInfo =
-                    await env.IMAGES.info(
-                        infoResponse.body
-                    );
-
-            } catch (error) {
-                return json(
-                    {
-                        error:
-                            "Cloudflare could not identify the image",
-
-                        details:
-                            String(error)
-                    },
-                    415
-                );
-            }
-
-            if (
-                !originalInfo ||
-                typeof originalInfo.width !==
-                    "number" ||
-                typeof originalInfo.height !==
-                    "number"
-            ) {
-                return json(
-                    {
-                        error:
-                            "Cloudflare returned invalid image dimensions"
-                    },
-                    500
-                );
-            }
-
-            /*
-             * Calculate the dimensions that the
-             * scale-down transformation will produce.
-             */
-            const outputSize =
-                calculateOutputSize(
-                    originalInfo.width,
-                    originalInfo.height,
-                    maxSize
-                );
-
-            const width =
-                outputSize.width;
-
-            const height =
-                outputSize.height;
-
-            /*
-             * Transform the image using Cloudflare Images.
-             *
-             * Crucially, the output format is "rgba".
-             *
-             * This means Cloudflare gives us the raw
-             * RGBA pixel buffer directly.
-             *
-             * WebP therefore requires no WebP decoder.
-             * PNG requires no PNG decoder.
-             * JPEG requires no JPEG decoder.
-             *
-             * anim:false means an animated WebP/GIF is
-             * reduced to its first frame.
-             */
-            let transformation;
-
-            try {
-                transformation =
+                transformed =
                     await env.IMAGES
                         .input(
                             sourceResponse.body
@@ -412,7 +620,7 @@ export default {
                         })
                         .output({
                             format:
-                                "rgba",
+                                "image/png",
 
                             anim:
                                 false
@@ -432,15 +640,41 @@ export default {
             }
 
             /*
-             * Get the raw RGBA stream.
+             * Get the actual transformed response.
              */
-            let rgbaBuffer;
+            let transformedResponse;
 
             try {
-                rgbaBuffer =
-                    await new Response(
-                        transformation.image()
-                    ).arrayBuffer();
+                transformedResponse =
+                    transformed.response();
+
+            } catch (error) {
+                return json(
+                    {
+                        error:
+                            "Could not create transformed image response",
+
+                        details:
+                            String(error)
+                    },
+                    500
+                );
+            }
+
+            /*
+             * Read the transformed PNG.
+             *
+             * IMPORTANT:
+             *
+             * We will determine width/height from this
+             * actual PNG instead of predicting them.
+             */
+            let transformedBuffer;
+
+            try {
+                transformedBuffer =
+                    await transformedResponse
+                        .arrayBuffer();
 
             } catch (error) {
                 return json(
@@ -455,50 +689,42 @@ export default {
                 );
             }
 
-            const pixels =
+            const transformedBytes =
                 new Uint8Array(
-                    rgbaBuffer
+                    transformedBuffer
                 );
 
-            /*
-             * RGBA = 4 bytes per pixel.
-             */
-            const expectedBytes =
-                width *
-                height *
-                4;
-
-            /*
-             * The calculated dimensions normally match
-             * exactly. If they don't, give a useful error
-             * instead of sending corrupted data to Roblox.
-             */
             if (
-                pixels.length !==
-                expectedBytes
+                transformedBytes.length === 0
             ) {
                 return json(
                     {
                         error:
-                            "Cloudflare returned an unexpected RGBA buffer size",
+                            "Transformed image was empty"
+                    },
+                    500
+                );
+            }
 
-                        originalWidth:
-                            originalInfo.width,
+            /*
+             * Decode the ACTUAL transformed PNG.
+             */
+            let png;
 
-                        originalHeight:
-                            originalInfo.height,
+            try {
+                png =
+                    decode(
+                        transformedBytes
+                    );
 
-                        calculatedWidth:
-                            width,
+            } catch (error) {
+                return json(
+                    {
+                        error:
+                            "Transformed PNG decoding failed",
 
-                        calculatedHeight:
-                            height,
-
-                        expectedBytes:
-                            expectedBytes,
-
-                        actualBytes:
-                            pixels.length
+                        details:
+                            String(error)
                     },
                     500
                 );
@@ -507,14 +733,186 @@ export default {
             /*
              * IMPORTANT:
              *
-             * Return raw bytes.
+             * These are now the real dimensions produced
+             * by Cloudflare.
              *
-             * We explicitly disable automatic response
-             * encoding so Cloudflare does not gzip/brotli
-             * the binary pixel data behind our backs.
+             * No calculation based on the source image.
+             */
+            const width =
+                png.width;
+
+            const height =
+                png.height;
+
+            if (
+                !width ||
+                !height
+            ) {
+                return json(
+                    {
+                        error:
+                            "Cloudflare returned invalid transformed dimensions"
+                    },
+                    500
+                );
+            }
+
+            if (
+                width > MAX_SIZE ||
+                height > MAX_SIZE
+            ) {
+                return json(
+                    {
+                        error:
+                            "Transformed image exceeds maximum size",
+
+                        width,
+                        height,
+
+                        maxSize:
+                            MAX_SIZE
+                    },
+                    500
+                );
+            }
+
+            /*
+             * Convert the actual PNG to RGBA.
+             */
+            let decoded;
+
+            try {
+                decoded =
+                    pngToRGBA(
+                        png
+                    );
+
+            } catch (error) {
+                return json(
+                    {
+                        error:
+                            "PNG pixel conversion failed",
+
+                        details:
+                            String(error),
+
+                        width,
+                        height,
+
+                        colorType:
+                            png.colorType,
+
+                        bitDepth:
+                            png.bitDepth,
+
+                        lineSize:
+                            png.lineSize,
+
+                        decodedBytes:
+                            png.image
+                                ? png.image.length
+                                : 0
+                    },
+                    500
+                );
+            }
+
+            /*
+             * Final RGBA validation uses the ACTUAL
+             * transformed dimensions.
+             */
+            const expectedRGBABytes =
+                width *
+                height *
+                4;
+
+            if (
+                decoded.pixels.length !==
+                expectedRGBABytes
+            ) {
+                return json(
+                    {
+                        error:
+                            "Unexpected RGBA buffer size",
+
+                        width,
+                        height,
+
+                        expectedBytes:
+                            expectedRGBABytes,
+
+                        actualBytes:
+                            decoded.pixels.length,
+
+                        colorType:
+                            png.colorType,
+
+                        bitDepth:
+                            png.bitDepth,
+
+                        lineSize:
+                            png.lineSize
+                    },
+                    500
+                );
+            }
+
+            /*
+             * Reduce opaque RGBA to RGB.
+             *
+             * This saves 25% before the Roblox server's
+             * Zstandard compression.
+             */
+            const optimized =
+                rgbaToRGBIfOpaque(
+                    decoded.pixels,
+                    width,
+                    height
+                );
+
+            /*
+             * Verify final output size.
+             */
+            const expectedOutputBytes =
+                width *
+                height *
+                optimized.channels;
+
+            if (
+                optimized.pixels.length !==
+                expectedOutputBytes
+            ) {
+                return json(
+                    {
+                        error:
+                            "Internal pixel buffer size error",
+
+                        width,
+                        height,
+
+                        channels:
+                            optimized.channels,
+
+                        expectedBytes:
+                            expectedOutputBytes,
+
+                        actualBytes:
+                            optimized.pixels.length
+                    },
+                    500
+                );
+            }
+
+            /*
+             * Return EXACTLY the pixel bytes.
+             *
+             * No gzip.
+             * No Content-Encoding.
+             * No JSON pixels.
+             * No Base64.
              */
             return new Response(
-                pixels,
+                optimized.pixels,
                 {
                     status: 200,
 
@@ -541,18 +939,17 @@ export default {
                             ),
 
                         "X-Image-Channels":
-                            "4",
+                            String(
+                                optimized.channels
+                            ),
 
                         "X-Image-Raw-Bytes":
                             String(
-                                pixels.length
+                                optimized.pixels.length
                             ),
 
                         "X-Image-Compression":
-                            "none",
-
-                        "X-Image-Format":
-                            "rgba"
+                            "none"
                     }
                 }
             );
