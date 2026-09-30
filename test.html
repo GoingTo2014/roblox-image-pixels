@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<body>
+
+<h2>Roblox Image Pixel Test</h2>
+
+<input id="url" size="80"
+       placeholder="Paste an image URL here">
+
+<button onclick="test()">Test</button>
+
+<pre id="output"></pre>
+
+<script>
+async function test() {
+    const url = document.getElementById("url").value;
+    const output = document.getElementById("output");
+
+    output.textContent = "Loading...";
+
+    try {
+        const response = await fetch(
+            "YOUR_WORKER_URL",
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    url: url
+                })
+            }
+        );
+
+        const data = await response.json();
+
+        output.textContent =
+            JSON.stringify(data, null, 2);
+
+    } catch (error) {
+        output.textContent =
+            "Error: " + error;
+    }
+}
+</script>
+
+</body>
+</html>
