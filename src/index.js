@@ -48,11 +48,14 @@ function isJPEG(bytes) {
 }
 
 /*
- * Convert PNG decoder output to RGBA8.
+ * Convert an 8-bit PNG into RGBA8.
 
- * The Cloudflare image transformation normally gives us
- * an already-small image, so this function only has to deal
- * with the transformed image rather than the original source.
+ * Supported color types:
+ *
+ * 0 = grayscale
+ * 2 = RGB
+ * 4 = grayscale + alpha
+ * 6 = RGBA
  */
 function pngToRGBA(png) {
     const width = png.width;
@@ -61,8 +64,7 @@ function pngToRGBA(png) {
 
     const colorType = png.colorType;
     const bitDepth = png.bitDepth;
-    const lineSize =
-        png.lineSize || 0;
+    const lineSize = png.lineSize || 0;
 
     if (!source) {
         throw new Error(
@@ -79,17 +81,15 @@ function pngToRGBA(png) {
     if (bitDepth !== 8) {
         throw new Error(
             "Unsupported PNG bit depth: " +
-            bitDepth
+            bitDepth +
+            ". Only 8-bit PNGs are currently supported."
         );
     }
 
     /*
-     * Fast path:
-     *
-     * color type 6 = RGBA.
-     *
-     * The decoder already gave us exactly what
-     * EditableImage ultimately needs.
+     * RGBA PNG:
+     * decoder already gives us exactly the
+     * byte layout we want.
      */
     if (colorType === 6) {
         const expected =
@@ -117,8 +117,6 @@ function pngToRGBA(png) {
 
     /*
      * RGB PNG.
-     *
-     * Convert RGB → RGBA.
      */
     if (colorType === 2) {
         const sourceLineSize =
@@ -132,10 +130,6 @@ function pngToRGBA(png) {
                 4
             );
 
-        /*
-         * One loop is required here because
-         * we need to insert alpha bytes.
-         */
         for (
             let y = 0;
             y < height;
@@ -357,15 +351,20 @@ export default {
                     "Roblox image pixel Worker is online!",
                 maxSize:
                     MAX_SIZE,
+                supportedInputs: [
+                    "PNG",
+                    "JPEG",
+                    "WebP"
+                ],
                 outputFormat:
                     "raw-rgba-binary",
-                imageTransformation:
-                    true
+                animatedImages:
+                    "first-frame-only"
             });
         }
 
         /*
-         * Only POST is accepted.
+         * Only POST.
          */
         if (
             request.method !==
@@ -381,14 +380,11 @@ export default {
         }
 
         try {
-            /*
-             * Parse request.
-             */
             const body =
                 await request.json();
 
             /*
-             * Validate image URL.
+             * Validate URL.
              */
             if (
                 !body.url ||
@@ -433,9 +429,7 @@ export default {
             }
 
             /*
-             * Requested maximum output size.
-             *
-             * Server always clamps this to 1024.
+             * Parse requested size.
              */
             let requestedSize =
                 Number(
@@ -463,12 +457,17 @@ export default {
                 );
 
             /*
-             * IMPORTANT:
+             * Ask Cloudflare to:
              *
-             * Cloudflare performs the resizing here.
+             * 1. Fetch the source image.
+             * 2. Resize it to <= maxSize.
+             * 3. Preserve aspect ratio.
+             * 4. Convert it to PNG.
+             * 5. For animated WebP/GIF, only use
+             *    the first frame.
              *
-             * The Worker does NOT download the huge
-             * original and resize it in JavaScript.
+             * This means our Worker never has to decode
+             * the huge original WebP.
              */
             let imageResponse;
 
@@ -482,7 +481,7 @@ export default {
                                     "Mozilla/5.0",
 
                                 "Accept":
-                                    "image/png,image/jpeg,image/*,*/*"
+                                    "image/png,image/jpeg,image/webp,image/*,*/*"
                             },
 
                             cf: {
@@ -498,6 +497,9 @@ export default {
 
                                     format:
                                         "png",
+
+                                    anim:
+                                        false,
 
                                     metadata:
                                         "none"
@@ -519,11 +521,9 @@ export default {
             }
 
             /*
-             * Do not fall back to the original image.
+             * Never fall back to the original source.
              *
-             * Falling back could bring the huge source image
-             * back into the Worker and recreate the resource
-             * problem we're trying to avoid.
+             * That would defeat the resource optimization.
              */
             if (
                 !imageResponse.ok
@@ -544,10 +544,9 @@ export default {
             }
 
             /*
-             * Get transformed image bytes.
+             * Get the transformed PNG.
              *
-             * At this point Cloudflare should already have
-             * reduced the dimensions to <= 1024×1024.
+             * WebP is already converted to PNG here.
              */
             const transformedBuffer =
                 await imageResponse.arrayBuffer();
@@ -570,10 +569,7 @@ export default {
             }
 
             /*
-             * Safety limit for the transformed image.
-             *
-             * 1024×1024 RGBA is about 4 MB, so 5 MB gives
-             * enough room without allowing something enormous.
+             * Safety limit.
              */
             if (
                 transformedBytes.length >
@@ -595,113 +591,17 @@ export default {
             }
 
             /*
-             * Detect the format produced by Cloudflare.
+             * We explicitly requested PNG.
              */
-            const transformedIsPNG =
-                isPNG(
+            if (
+                !isPNG(
                     transformedBytes
-                );
-
-            const transformedIsJPEG =
-                isJPEG(
-                    transformedBytes
-                );
-
-            let width;
-            let height;
-            let channels;
-            let pixels;
-
-            /*
-             * PNG path.
-             *
-             * Cloudflare was asked for PNG, so this
-             * should be the normal path.
-             */
-            if (transformedIsPNG) {
-                try {
-                    const png =
-                        decode(
-                            transformedBytes
-                        );
-
-                    const decoded =
-                        pngToRGBA(png);
-
-                    width =
-                        decoded.width;
-
-                    height =
-                        decoded.height;
-
-                    channels =
-                        decoded.channels;
-
-                    pixels =
-                        decoded.pixels;
-
-                } catch (error) {
-                    return json(
-                        {
-                            error:
-                                "Transformed PNG decoding failed",
-
-                            details:
-                                String(error)
-                        },
-                        500
-                    );
-                }
-
-            /*
-             * JPEG fallback.
-             */
-            } else if (
-                transformedIsJPEG
+                )
             ) {
-                try {
-                    const decoded =
-                        jpeg.decode(
-                            transformedBytes,
-                            {
-                                useTArray:
-                                    true,
-
-                                formatAsRGBA:
-                                    true
-                            }
-                        );
-
-                    width =
-                        decoded.width;
-
-                    height =
-                        decoded.height;
-
-                    channels =
-                        4;
-
-                    pixels =
-                        decoded.data;
-
-                } catch (error) {
-                    return json(
-                        {
-                            error:
-                                "Transformed JPEG decoding failed",
-
-                            details:
-                                String(error)
-                        },
-                        500
-                    );
-                }
-
-            } else {
                 return json(
                     {
                         error:
-                            "Cloudflare returned an unsupported image format",
+                            "Cloudflare did not return the expected PNG output",
 
                         contentType:
                             imageResponse.headers.get(
@@ -713,17 +613,74 @@ export default {
             }
 
             /*
-             * Final validation.
+             * Decode the already-resized PNG.
+             */
+            let png;
+
+            try {
+                png =
+                    decode(
+                        transformedBytes
+                    );
+            } catch (error) {
+                return json(
+                    {
+                        error:
+                            "PNG decoding failed",
+
+                        details:
+                            String(error)
+                    },
+                    500
+                );
+            }
+
+            /*
+             * Convert to RGBA pixel bytes.
+             */
+            let decoded;
+
+            try {
+                decoded =
+                    pngToRGBA(
+                        png
+                    );
+            } catch (error) {
+                return json(
+                    {
+                        error:
+                            "PNG pixel conversion failed",
+
+                        details:
+                            String(error)
+                    },
+                    500
+                );
+            }
+
+            const width =
+                decoded.width;
+
+            const height =
+                decoded.height;
+
+            const channels =
+                decoded.channels;
+
+            const pixels =
+                decoded.pixels;
+
+            /*
+             * Final dimensions check.
              */
             if (
-                !width ||
-                !height ||
-                !pixels
+                width < 1 ||
+                height < 1
             ) {
                 return json(
                     {
                         error:
-                            "Decoder returned invalid image data"
+                            "Invalid transformed image dimensions"
                     },
                     500
                 );
@@ -736,7 +693,7 @@ export default {
                 return json(
                     {
                         error:
-                            "Cloudflare returned an image larger than the limit",
+                            "Transformed image exceeds maximum dimensions",
 
                         width,
                         height,
@@ -747,6 +704,9 @@ export default {
                 );
             }
 
+            /*
+             * Final buffer-size check.
+             */
             const expectedBytes =
                 width *
                 height *
@@ -777,15 +737,12 @@ export default {
             /*
              * Return raw binary pixels.
              *
-             * NO:
-             *   gzip
-             *   base64
-             *   JSON pixel arrays
-             *   Content-Encoding
-             *
-             * Roblox's server script will put these bytes
-             * into a buffer and compress them with native
-             * Roblox Zstandard before sending them to the client.
+             * No:
+             * - JSON pixel arrays
+             * - Base64
+             * - gzip
+             * - WASM compression
+             * - Content-Encoding
              */
             return new Response(
                 pixels,
