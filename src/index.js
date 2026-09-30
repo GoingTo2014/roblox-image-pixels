@@ -1,16 +1,9 @@
 import { decode } from "@cf-wasm/png/workerd";
 import jpeg from "jpeg-js";
-import { Zstd } from "@hpcc-js/wasm-zstd";
 
 const MAX_BYTES = 5 * 1024 * 1024;
-
-// Absolute maximum output dimension.
-// The client can request anything smaller.
 const MAX_SIZE_LIMIT = 1024;
-
-// Zstandard compression level.
-// 3 is the library's current default and is a good speed/size balance.
-const ZSTD_LEVEL = 3;
+const GZIP_LEVEL = 6;
 
 const CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
@@ -18,40 +11,6 @@ const CORS_HEADERS = {
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Max-Age": "86400"
 };
-
-let zstdPromise = null;
-
-// @hpcc-js/wasm-zstd returns a singleton.
-// Keep loading lazy so the Worker health endpoint stays cheap.
-function getZstd() {
-    if (!zstdPromise) {
-        zstdPromise = Zstd.load();
-    }
-
-    return zstdPromise;
-}
-
-// Serialize compression operations because the Zstd singleton
-// has mutable compression state.
-let compressionQueue = Promise.resolve();
-
-function compressWithZstd(data) {
-    const operation = compressionQueue.then(async () => {
-        const zstd = await getZstd();
-
-        return zstd.compress(
-            data,
-            ZSTD_LEVEL
-        );
-    });
-
-    // Make sure a failed operation does not permanently poison
-    // the queue for all future requests.
-    compressionQueue =
-        operation.catch(() => {});
-
-    return operation;
-}
 
 function json(data, status = 200) {
     return new Response(
@@ -90,18 +49,6 @@ function isJPEG(bytes) {
     );
 }
 
-/*
- * Convert the decoded PNG into RGBA8.
-
- * Supported color types:
- * 0 = grayscale
- * 2 = RGB
- * 4 = grayscale + alpha
- * 6 = RGBA
- *
- * This intentionally keeps the same PNG compatibility behavior
- * as your current working version.
- */
 function pngToRGBA(png) {
     const width = png.width;
     const height = png.height;
@@ -208,8 +155,7 @@ function pngToRGBA(png) {
                 x * 4;
 
             if (
-                sourceIndex +
-                channels >
+                sourceIndex + channels >
                 source.length
             ) {
                 throw new Error(
@@ -287,15 +233,6 @@ function pngToRGBA(png) {
     return rgba;
 }
 
-/*
- * Resize the RGBA image using nearest-neighbor sampling.
- *
- * Returns RGB when every pixel is fully opaque.
- * Returns RGBA only when alpha is actually needed.
- *
- * That means normal opaque images save 25% immediately,
- * before Zstandard compression even happens.
- */
 function resizePixels(
     rgba,
     sourceWidth,
@@ -342,7 +279,9 @@ function resizePixels(
         const sourceY =
             Math.min(
                 sourceHeight - 1,
-                Math.floor(y / scale)
+                Math.floor(
+                    y / scale
+                )
             );
 
         for (
@@ -353,7 +292,9 @@ function resizePixels(
             const sourceX =
                 Math.min(
                     sourceWidth - 1,
-                    Math.floor(x / scale)
+                    Math.floor(
+                        x / scale
+                    )
                 );
 
             const sourceIndex =
@@ -434,11 +375,28 @@ function resizePixels(
     };
 }
 
+async function gzipBytes(bytes) {
+    const stream =
+        new CompressionStream(
+            "gzip"
+        );
+
+    const writer =
+        stream.writable.getWriter();
+
+    await writer.write(bytes);
+    await writer.close();
+
+    const result =
+        await new Response(
+            stream.readable
+        ).arrayBuffer();
+
+    return new Uint8Array(result);
+}
+
 export default {
     async fetch(request) {
-        /*
-         * CORS preflight
-         */
         if (
             request.method ===
             "OPTIONS"
@@ -453,9 +411,6 @@ export default {
             );
         }
 
-        /*
-         * Health check
-         */
         if (
             request.method ===
             "GET"
@@ -467,13 +422,10 @@ export default {
                 maxSize:
                     MAX_SIZE_LIMIT,
                 outputFormat:
-                    "zstd-binary"
+                    "gzip-binary"
             });
         }
 
-        /*
-         * Only POST for image conversion.
-         */
         if (
             request.method !==
             "POST"
@@ -533,11 +485,6 @@ export default {
                 );
             }
 
-            /*
-             * Client-requested output size.
-             *
-             * Always clamp it server-side.
-             */
             const requestedSize =
                 Number(body.maxSize);
 
@@ -556,9 +503,6 @@ export default {
                     )
                     : MAX_SIZE_LIMIT;
 
-            /*
-             * Fetch source image.
-             */
             const imageResponse =
                 await fetch(
                     imageURL.toString(),
@@ -595,11 +539,13 @@ export default {
                     .trim()
                     .toLowerCase();
 
-            const buffer =
+            const arrayBuffer =
                 await imageResponse.arrayBuffer();
 
             const bytes =
-                new Uint8Array(buffer);
+                new Uint8Array(
+                    arrayBuffer
+                );
 
             if (bytes.length === 0) {
                 return json(
@@ -619,10 +565,8 @@ export default {
                     {
                         error:
                             "Image is too large",
-
                         downloadedBytes:
                             bytes.length,
-
                         maxBytes:
                             MAX_BYTES
                     },
@@ -640,9 +584,6 @@ export default {
             let sourceHeight;
             let rgba;
 
-            /*
-             * PNG
-             */
             if (actualPNG) {
                 try {
                     const png =
@@ -656,28 +597,20 @@ export default {
 
                     rgba =
                         pngToRGBA(png);
-
                 } catch (error) {
                     return json(
                         {
                             error:
                                 "PNG decoding failed",
-
                             details:
                                 String(error),
-
                             contentType,
-
                             downloadedBytes:
                                 bytes.length
                         },
                         500
                     );
                 }
-
-            /*
-             * JPEG
-             */
             } else if (actualJPEG) {
                 try {
                     const jpegImage =
@@ -697,25 +630,20 @@ export default {
 
                     rgba =
                         jpegImage.data;
-
                 } catch (error) {
                     return json(
                         {
                             error:
                                 "JPEG decoding failed",
-
                             details:
                                 String(error),
-
                             contentType,
-
                             downloadedBytes:
                                 bytes.length
                         },
                         500
                     );
                 }
-
             } else {
                 let preview = "";
 
@@ -736,14 +664,11 @@ export default {
                     {
                         error:
                             "Downloaded file is not a PNG or JPEG",
-
                         contentType:
                             contentType ||
                             "unknown",
-
                         downloadedBytes:
                             bytes.length,
-
                         firstBytes:
                             Array.from(
                                 bytes.slice(
@@ -751,7 +676,6 @@ export default {
                                     16
                                 )
                             ),
-
                         responsePreview:
                             preview
                     },
@@ -759,9 +683,6 @@ export default {
                 );
             }
 
-            /*
-             * Validate decoder output.
-             */
             if (
                 !sourceWidth ||
                 !sourceHeight ||
@@ -770,15 +691,7 @@ export default {
                 return json(
                     {
                         error:
-                            "Decoder returned invalid image data",
-
-                        sourceWidth,
-                        sourceHeight,
-
-                        pixelBytes:
-                            rgba
-                                ? rgba.length
-                                : 0
+                            "Decoder returned invalid image data"
                     },
                     500
                 );
@@ -797,13 +710,8 @@ export default {
                     {
                         error:
                             "RGBA conversion produced an invalid size",
-
-                        sourceWidth,
-                        sourceHeight,
-
                         expectedBytes:
                             expectedRGBABytes,
-
                         actualBytes:
                             rgba.length
                     },
@@ -811,10 +719,6 @@ export default {
                 );
             }
 
-            /*
-             * Resize and automatically select
-             * RGB vs RGBA.
-             */
             const resized =
                 resizePixels(
                     rgba,
@@ -823,41 +727,14 @@ export default {
                     maxSize
                 );
 
-            /*
-             * Release the original reference
-             * as soon as possible.
-             */
-            rgba = null;
+            const rawBytes =
+                resized.pixels.length;
 
-            /*
-             * Compress the flat binary data.
-             */
-            let compressed;
-
-            try {
-                compressed =
-                    await compressWithZstd(
-                        resized.pixels
-                    );
-            } catch (error) {
-                return json(
-                    {
-                        error:
-                            "Zstandard compression failed",
-
-                        details:
-                            String(error)
-                    },
-                    500
+            const compressed =
+                await gzipBytes(
+                    resized.pixels
                 );
-            }
 
-            /*
-             * Return ONLY binary data.
-             *
-             * Dimensions and format live in headers,
-             * avoiding another JSON payload.
-             */
             return new Response(
                 compressed,
                 {
@@ -869,8 +746,11 @@ export default {
                         "Content-Type":
                             "application/octet-stream",
 
+                        "Content-Encoding":
+                            "gzip",
+
                         "Cache-Control":
-                            "no-store, no-transform",
+                            "no-store",
 
                         "X-Image-Width":
                             String(
@@ -889,7 +769,7 @@ export default {
 
                         "X-Image-Raw-Bytes":
                             String(
-                                resized.pixels.length
+                                rawBytes
                             ),
 
                         "X-Image-Compressed-Bytes":
@@ -898,12 +778,7 @@ export default {
                             ),
 
                         "X-Image-Compression":
-                            "zstd",
-
-                        "X-Image-Compression-Level":
-                            String(
-                                ZSTD_LEVEL
-                            )
+                            "gzip"
                     }
                 }
             );
@@ -915,7 +790,6 @@ export default {
                 {
                     error:
                         "Failed to process image",
-
                     details:
                         String(error)
                 },
